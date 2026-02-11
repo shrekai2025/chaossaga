@@ -6,6 +6,7 @@ import type { NormalizedTool } from "../adapters/types";
 import { prisma } from "@/lib/db/prisma";
 import { clearActiveBattle } from "./action-tools";
 import { resolveQuest } from "./resolve-id";
+import { logPlayerAction } from "@/lib/game/logger";
 
 // ============================================================
 // 工具定义
@@ -319,7 +320,7 @@ export async function updateQuest(
   const pq = resolved.record;
 
   const progress = pq.progress as Array<{ currentCount: number; completed: boolean }>;
-  const objectives = pq.quest.objectives as Array<{ targetCount?: number }>;
+  const objectives = pq.quest.objectives as Array<{ description?: string; targetCount?: number }>;
 
   if (completed) {
     // 直接完成任务
@@ -368,6 +369,14 @@ export async function updateQuest(
       select: { exp: true, gold: true, spiritStones: true, level: true },
     });
 
+    // 记录日志
+    await logPlayerAction(
+      playerId,
+      "quest",
+      `完成任务：${pq.quest.name}，获得奖励`,
+      { questId: pq.questId, rewards }
+    );
+
     return {
       success: true,
       data: { questName: pq.quest.name, status: "completed", rewards },
@@ -399,6 +408,14 @@ export async function updateQuest(
         status: allDone ? "completed" : "active",
       },
     });
+
+    // 记录日志
+    await logPlayerAction(
+      playerId,
+      "quest",
+      `任务进度更新：${pq.quest.name} - ${objectives[objectiveIndex]?.description || "目标"} (${progress[objectiveIndex].currentCount}/${objectives[objectiveIndex]?.targetCount || 1})`,
+      { questId: pq.questId, objectiveIndex, current: progress[objectiveIndex].currentCount, target: objectives[objectiveIndex]?.targetCount }
+    );
 
     return {
       success: true,

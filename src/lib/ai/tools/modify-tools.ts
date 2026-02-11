@@ -4,6 +4,7 @@
 
 import type { NormalizedTool } from "../adapters/types";
 import { prisma } from "@/lib/db/prisma";
+import { logPlayerAction } from "@/lib/game/logger";
 
 // ============================================================
 // 工具定义
@@ -164,6 +165,15 @@ export async function modifyPlayerData(
     stateUpdate[change.field] = change.to;
   }
 
+  // 记录日志
+  const changeSummary = changes.map(c => `${c.field}: ${c.from} -> ${c.to}`).join(", ");
+  await logPlayerAction(
+    playerId,
+    "misc", // 使用 misc 类型，因为通常由于 GM 或特殊事件触发
+    `数据变更 (${reason}): ${changeSummary}`,
+    { reason, changes: stateUpdate }
+  );
+
   return {
     success: true,
     data: { reason, changes },
@@ -201,6 +211,15 @@ export async function addItem(
     });
     added.push({ name: item.name, quantity: item.quantity || 1 });
   }
+
+  // 记录日志
+  const itemNames = added.map(i => `${i.name} x${i.quantity}`).join(", ");
+  await logPlayerAction(
+    playerId,
+    "reward", // add_item 通常用于奖励
+    `获得物品: ${itemNames}`,
+    { items: added }
+  );
 
   return {
     success: true,
