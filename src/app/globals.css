@@ -1,26 +1,215 @@
 @import "tailwindcss";
 
+/* ============================================================
+   ChaosSaga — 亮色清爽主题
+   设计理念：理性、高效、留白、信息密度适中
+   ============================================================ */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f8f9fb;
+  --foreground: #1a1d23;
+  --accent: #4f6ef7;
+  --accent-dim: #3b5de5;
+  --accent-light: #eef1fe;
+  --surface: #ffffff;
+  --surface-hover: #f0f2f5;
+  --border: #e2e5ea;
+  --border-light: #eef0f3;
+  --muted: #8b919a;
+  --success: #16a34a;
+  --danger: #dc2626;
+  --warning: #d97706;
+  --info: #2563eb;
+  --hp-bar: #ef4444;
+  --mp-bar: #6366f1;
+  --exp-bar: #f59e0b;
+  --gold: #d97706;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+  --shadow-md: 0 2px 8px rgba(0,0,0,0.06);
+  --shadow-lg: 0 4px 16px rgba(0,0,0,0.08);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-xs: 6px;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-accent: var(--accent);
+  --color-accent-dim: var(--accent-dim);
+  --color-accent-light: var(--accent-light);
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+  --color-border: var(--border);
+  --color-border-light: var(--border-light);
+  --color-muted: var(--muted);
+  --color-success: var(--success);
+  --color-danger: var(--danger);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), "Noto Sans SC", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 自定义滚动条（纤细、融入背景） */
+::-webkit-scrollbar {
+  width: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+/* ============================================================
+   HP / MP / EXP 进度条
+   ============================================================ */
+.bar-hp {
+  background: linear-gradient(90deg, #ef4444, #f87171);
+}
+.bar-mp {
+  background: linear-gradient(90deg, #6366f1, #818cf8);
+}
+.bar-exp {
+  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+}
+
+/* ============================================================
+   动画
+   ============================================================ */
+
+/* 消息淡入 */
+@keyframes messageIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-message-in {
+  animation: messageIn 0.25s ease-out;
+}
+
+/* AI 思考动画 */
+@keyframes thinking {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
+}
+.animate-thinking span {
+  animation: thinking 1.4s infinite;
+}
+.animate-thinking span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.animate-thinking span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* 流式文本光标 */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.streaming-cursor::after {
+  content: "▎";
+  animation: blink 0.8s infinite;
+  color: var(--accent);
+  margin-left: 1px;
+}
+
+/* ============================================================
+   Markdown 样式（AI 消息）
+   ============================================================ */
+.prose-game {
+  color: var(--foreground);
+  word-break: break-word;
+  line-height: 1.65;
+}
+.prose-game p {
+  margin: 0.35em 0;
+}
+.prose-game p:first-child {
+  margin-top: 0;
+}
+.prose-game p:last-child {
+  margin-bottom: 0;
+}
+.prose-game strong {
+  color: var(--foreground);
+  font-weight: 600;
+}
+.prose-game em {
+  color: var(--accent);
+  font-style: italic;
+}
+.prose-game ul, .prose-game ol {
+  margin: 0.35em 0;
+  padding-left: 1.4em;
+}
+.prose-game li {
+  margin: 0.1em 0;
+}
+.prose-game h1, .prose-game h2, .prose-game h3 {
+  color: var(--foreground);
+  font-weight: 700;
+  margin: 0.5em 0 0.25em;
+}
+.prose-game h1 { font-size: 1.1em; }
+.prose-game h2 { font-size: 1.05em; }
+.prose-game h3 { font-size: 1em; }
+.prose-game hr {
+  border-color: var(--border);
+  margin: 0.5em 0;
+}
+.prose-game code {
+  background: var(--background);
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  padding: 0.1em 0.3em;
+  font-size: 0.88em;
+  font-family: var(--font-mono);
+}
+.prose-game pre {
+  background: var(--background);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-xs);
+  padding: 0.6em 0.8em;
+  margin: 0.35em 0;
+  overflow-x: auto;
+}
+.prose-game pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+.prose-game blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.8em;
+  margin: 0.35em 0;
+  color: var(--muted);
+}
+
+/* ============================================================
+   底部导航栏（移动端安全区域）
+   ============================================================ */
+.bottom-nav {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Tab 切换动画 */
+@keyframes tabFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.animate-tab-in {
+  animation: tabFadeIn 0.15s ease-out;
 }

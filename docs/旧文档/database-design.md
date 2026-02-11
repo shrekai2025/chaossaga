@@ -48,7 +48,6 @@
 | **境界相关**  |               |                                 |
 | realm         | String        | 当前境界 (ocean/land/barren...) |
 | realmProgress | Int           | 境界进度 (0-100)                |
-| level         | Int           | 等级 (1-100)                    |
 | exp           | BigInt        | 当前经验值                      |
 | **属性值**    |               |                                 |
 | maxHp         | Int           | 最大生命值                      |
@@ -62,7 +61,6 @@
 | critDamage    | Float         | 暴击伤害                        |
 | **经济**      |               |                                 |
 | gold          | BigInt        | 金币                            |
-| spiritStone   | Int           | 灵石                            |
 | **环境状态**  |               |                                 |
 | location      | String        | 当前位置                        |
 | weather       | String        | 天气                            |

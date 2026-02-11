@@ -1,0 +1,252 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// 系统配置
+// ============================================================
+
+model GameConfig {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+// ============================================================
+// 玩家
+// ============================================================
+
+model Player {
+  id            String   @id @default(cuid())
+  name          String
+  race          String   @default("human")
+  background    String   @default("")
+  level         Int      @default(1)
+  exp           Int      @default(0)
+  realm         String   @default("ocean")
+  hp            Int      @default(100)
+  maxHp         Int      @default(100)
+  mp            Int      @default(50)
+  maxMp         Int      @default(50)
+  attack        Int      @default(10)
+  defense       Int      @default(5)
+  speed         Int      @default(10)
+  gold          Int      @default(100)
+  spiritStones  Int      @default(0)
+  currentAreaId String?
+  currentNodeId String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  chatHistory ChatHistory[]
+  inventory   InventoryItem[]
+  equipment   Equipment[]
+  skills      PlayerSkill[]
+  quests      PlayerQuest[]
+  areas       PlayerArea[]
+  logs        PlayerLog[]
+}
+
+// ============================================================
+// 对话历史
+// ============================================================
+
+model ChatHistory {
+  id        String   @id @default(cuid())
+  playerId  String
+  role      String
+  content   String   @db.Text
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  player Player @relation(fields: [playerId], references: [id])
+
+  @@index([playerId, createdAt(sort: Desc)])
+}
+
+// ============================================================
+// 区域 & 节点
+// ============================================================
+
+model Area {
+  id               String   @id @default(cuid())
+  name             String
+  description      String   @db.Text
+  theme            String
+  recommendedLevel Int
+  createdByPlayer  String?
+  createdAt        DateTime @default(now())
+
+  nodes       AreaNode[]
+  playerAreas PlayerArea[]
+}
+
+model AreaNode {
+  id          String @id @default(cuid())
+  areaId      String
+  name        String
+  type        String
+  description String @db.Text
+  data        Json?
+  posX        Int    @default(0)
+  posY        Int    @default(0)
+
+  area        Area                 @relation(fields: [areaId], references: [id])
+  connections AreaNodeConnection[] @relation("fromNode")
+  connectedBy AreaNodeConnection[] @relation("toNode")
+
+  @@index([areaId])
+}
+
+model AreaNodeConnection {
+  id     String @id @default(cuid())
+  fromId String
+  toId   String
+
+  fromNode AreaNode @relation("fromNode", fields: [fromId], references: [id])
+  toNode   AreaNode @relation("toNode", fields: [toId], references: [id])
+
+  @@unique([fromId, toId])
+}
+
+// ============================================================
+// 背包 & 装备
+// ============================================================
+
+model InventoryItem {
+  id            String  @id @default(cuid())
+  playerId      String
+  name          String
+  type          String
+  quality       String  @default("common")
+  quantity      Int     @default(1)
+  stats         Json?
+  specialEffect String? @db.Text
+  equipped      Boolean @default(false)
+
+  player Player @relation(fields: [playerId], references: [id])
+
+  @@index([playerId])
+  @@index([playerId, equipped])
+  @@index([playerId, type])
+}
+
+model Equipment {
+  id       String @id @default(cuid())
+  playerId String
+  slot     String
+  itemId   String
+
+  player Player @relation(fields: [playerId], references: [id])
+
+  @@unique([playerId, slot])
+}
+
+// ============================================================
+// 技能
+// ============================================================
+
+model PlayerSkill {
+  id        String  @id @default(cuid())
+  playerId  String
+  name      String
+  element   String  @default("none")
+  damage    Int     @default(0)
+  mpCost    Int     @default(0)
+  cooldown  Int     @default(0)
+  effect    Json?
+  equipped  Boolean @default(false)
+  slotIndex Int?
+
+  player Player @relation(fields: [playerId], references: [id])
+
+  @@index([playerId])
+}
+
+// ============================================================
+// 任务
+// ============================================================
+
+model Quest {
+  id               String  @id @default(cuid())
+  name             String
+  description      String  @db.Text
+  type             String
+  npcId            String?
+  objectives       Json
+  rewards          Json
+  specialCondition String? @db.Text
+
+  playerQuests PlayerQuest[]
+}
+
+model PlayerQuest {
+  id        String   @id @default(cuid())
+  playerId  String
+  questId   String
+  status    String   @default("active")
+  progress  Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  player Player @relation(fields: [playerId], references: [id])
+  quest  Quest  @relation(fields: [questId], references: [id])
+
+  @@unique([playerId, questId])
+  @@index([playerId, status, updatedAt])
+}
+
+// ============================================================
+// 玩家区域探索
+// ============================================================
+
+model PlayerArea {
+  id            String @id @default(cuid())
+  playerId      String
+  areaId        String
+  exploredNodes Json   @default("[]")
+
+  player Player @relation(fields: [playerId], references: [id])
+  area   Area   @relation(fields: [areaId], references: [id])
+
+  @@unique([playerId, areaId])
+}
+
+// ============================================================
+// 战斗状态（临时）
+// ============================================================
+
+model BattleState {
+  id          String   @id @default(cuid())
+  playerId    String   @unique
+  enemies     Json
+  roundNumber Int      @default(1)
+  playerBuffs Json     @default("[]")
+  enemyBuffs  Json     @default("[]")
+  log         Json     @default("[]")
+  status      String   @default("active")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ============================================================
+// 玩家日志 (Data Log)
+// ============================================================
+
+model PlayerLog {
+  id        String   @id @default(cuid())
+  playerId  String
+  type      String   @default("info") // battle, quest, item, move, misc, reward
+  content   String   @db.Text
+  changes   Json? // e.g. { hp: -10, gold: +50 }
+  createdAt DateTime @default(now())
+
+  player Player @relation(fields: [playerId], references: [id])
+
+  @@index([playerId, createdAt(sort: Desc)])
+}

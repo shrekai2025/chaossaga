@@ -1,26 +1,56 @@
 {
   "name": "chaossaga",
   "version": "0.1.0",
+  "description": "An AI-powered RPG with dynamic storytelling and evolving world state.",
   "private": true,
+  "license": "MIT",
+  "keywords": [
+    "nextjs",
+    "rpg",
+    "ai",
+    "llm",
+    "game-development"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/chaossaga.git"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:generate": "npx prisma generate",
+    "db:migrate": "npx prisma migrate dev",
+    "db:push": "npx prisma db push",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:reset": "npx prisma migrate reset",
+    "db:studio": "npx prisma studio"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@prisma/adapter-pg": "^7.3.0",
+    "@prisma/client": "^7.3.0",
     "next": "16.1.6",
+    "pg": "^8.18.0",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "react-markdown": "^10.1.0",
+    "zustand": "^5.0.11"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pg": "^8.16.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
+    "prisma": "^7.3.0",
     "tailwindcss": "^4",
+    "tsx": "^4.21.0",
     "typescript": "^5"
   }
 }
