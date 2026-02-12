@@ -22,7 +22,7 @@ import {
   interactNpc,
 } from "./action-tools";
 import { generateArea, createQuest, updateQuest } from "./generate-tools";
-import { modifyPlayerData, addItem } from "./modify-tools";
+import { modifyPlayerData, addItem, abandonQuest } from "./modify-tools";
 
 // ============================================================
 // 工具定义导出（传给 LLM 的 tools 参数）
@@ -48,9 +48,21 @@ export const BATTLE_TOOLS: NormalizedTool[] = ALL_TOOLS.filter((t) =>
   ].includes(t.name)
 );
 
-/** 探索模式工具集 (完整工具列表 - 战斗工具) */
+/** GM 工具集 (仅限 /gm 指令或特殊情况调用) */
+export const GM_TOOLS: NormalizedTool[] = ALL_TOOLS.filter((t) =>
+  [
+    "modify_player_data",
+    "add_item",
+    "generate_area",
+    "abandon_quest"
+  ].includes(t.name)
+);
+
+/** 探索模式工具集 (标准游戏交互，不含 GM 工具) */
 export const EXPLORATION_TOOLS: NormalizedTool[] = ALL_TOOLS.filter(
-  (t) => t.name !== "execute_battle_action" // 探索模式不能直接调战斗动作（必须先 start_battle）
+  (t) => 
+    t.name !== "execute_battle_action" && // 排除战斗工具
+    !GM_TOOLS.some(gm => gm.name === t.name) // 排除 GM 工具
 );
 
 // ============================================================
@@ -88,6 +100,7 @@ const TOOL_HANDLERS: Record<
   // 修改类
   modify_player_data: modifyPlayerData,
   add_item: addItem,
+  abandon_quest: abandonQuest, // New GM tool
   // send_narrative: removed (LLM outputs text directly)
 };
 

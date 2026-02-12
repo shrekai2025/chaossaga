@@ -145,7 +145,25 @@ export async function resolveNpc(
     const data = node.data as Record<string, unknown> | null;
     if (!data) continue;
 
-    // NPC 节点
+    // 🆕 支持 npcs 数组（多个 NPC）
+    const npcs = data.npcs as Array<{ id?: string; name?: string; [key: string]: unknown }> | undefined;
+    if (npcs && Array.isArray(npcs)) {
+      for (const npc of npcs) {
+        if (npc.id === identifier || npc.name === identifier ||
+            (npc.name && npc.name.includes(identifier)) ||
+            (npc.id && npc.id.includes(identifier))) {
+          return {
+            found: true,
+            record: {
+              nodeId: node.id,
+              npc: { ...npc, id: npc.id || node.id, name: npc.name || "NPC" },
+            },
+          };
+        }
+      }
+    }
+
+    // 🆕 兼容旧格式：单个 NPC 对象（向后兼容）
     const npc = data.npc as { id?: string; name?: string; [key: string]: unknown } | undefined;
     if (npc) {
       if (npc.id === identifier || npc.name === identifier ||

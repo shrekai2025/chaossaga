@@ -116,7 +116,6 @@ export default function GamePage() {
           playerId={playerId}
           onSendCommand={sendMessage}
           onSystemAction={triggerResponse}
-          isBattle={playerState?.isBattle}
         />
       )}
 
@@ -132,6 +131,7 @@ export default function GamePage() {
             loadingHistory={loadingHistory}
             onLoadMore={handleLoadMore}
             onAbort={abort}
+            playerState={playerState}
           />
         )}
         {activeTab === "character" && (

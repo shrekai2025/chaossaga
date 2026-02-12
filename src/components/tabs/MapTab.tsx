@@ -5,9 +5,10 @@
  *
  * 列表视图：显示所有区域卡片，标注当前位置
  * 详情视图：显示区域节点、连接关系、支持点击移动
+ * 操作栏：完整性检查 + 区域扩展
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 /* ============================
    Types
@@ -31,6 +32,13 @@ interface AreaNode {
   data: Record<string, unknown> | null;
 }
 
+interface EdgeNodeInfo {
+  id: string;
+  name: string;
+  type: string;
+  connectionCount: number;
+}
+
 interface AreaDetail {
   id: string;
   name: string;
@@ -40,6 +48,15 @@ interface AreaDetail {
   nodes: AreaNode[];
   connections: Array<{ fromId: string; toId: string; from: string; to: string }>;
   currentNodeId: string | null;
+  edgeNodes?: EdgeNodeInfo[];
+}
+
+/** SSE 操作进度日志条目 */
+interface ProgressEntry {
+  id: number;
+  type: "info" | "issue" | "fix" | "success" | "error" | "node";
+  message: string;
+  timestamp: number;
 }
 
 /* ============================
@@ -226,7 +243,415 @@ function NodeDataView({ node }: { node: AreaNode }) {
   return null;
 }
 
-/** 区域详情视图（含移动功能） */
+/* ============================
+   SSE Progress Panel
+   ============================ */
+
+const ENTRY_ICONS: Record<ProgressEntry["type"], string> = {
+  info: "🔍",
+  issue: "⚠️",
+  fix: "🔧",
+  success: "✅",
+  error: "❌",
+  node: "📍",
+};
+
+function ProgressPanel({
+  title,
+  entries,
+  isRunning,
+  onClose,
+}: {
+  title: string;
+  entries: ProgressEntry[];
+  isRunning: boolean;
+  onClose: () => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [entries]);
+
+  return (
+    <div
+      className="rounded-xl border border-border bg-surface p-4"
+      style={{ boxShadow: "var(--shadow-sm)" }}
+    >
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-xs font-semibold text-foreground flex items-center gap-2">
+          {isRunning && (
+            <span className="h-2 w-2 animate-spin rounded-full border border-accent/30 border-t-accent" />
+          )}
+          {title}
+        </h3>
+        {!isRunning && (
+          <button
+            onClick={onClose}
+            className="text-[10px] text-muted hover:text-foreground transition-colors"
+          >
+            关闭
+          </button>
+        )}
+      </div>
+
+      <div
+        ref={scrollRef}
+        className="max-h-48 overflow-y-auto space-y-1.5"
+      >
+        {entries.map((entry) => (
+          <div
+            key={entry.id}
+            className={`flex items-start gap-1.5 text-[11px] leading-relaxed animate-in fade-in slide-in-from-bottom-1 duration-200 ${
+              entry.type === "error"
+                ? "text-red-500"
+                : entry.type === "success"
+                ? "text-green-600"
+                : entry.type === "issue"
+                ? "text-amber-600"
+                : entry.type === "fix"
+                ? "text-blue-500"
+                : entry.type === "node"
+                ? "text-purple-600"
+                : "text-muted"
+            }`}
+          >
+            <span className="shrink-0 mt-0.5">{ENTRY_ICONS[entry.type]}</span>
+            <span>{entry.message}</span>
+          </div>
+        ))}
+        {isRunning && entries.length === 0 && (
+          <p className="text-[11px] text-muted animate-pulse">正在处理中...</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================
+   SSE Helper Hook
+   ============================ */
+
+function useSSEOperation() {
+  const [isRunning, setIsRunning] = useState(false);
+  const [entries, setEntries] = useState<ProgressEntry[]>([]);
+  const [isVisible, setIsVisible] = useState(false);
+  const entryIdRef = useRef(0);
+
+  const addEntry = useCallback((type: ProgressEntry["type"], message: string) => {
+    const newEntry: ProgressEntry = {
+      id: entryIdRef.current++,
+      type,
+      message,
+      timestamp: Date.now(),
+    };
+    setEntries((prev) => [...prev, newEntry]);
+  }, []);
+
+  const startOperation = useCallback(
+    async (url: string, body: Record<string, unknown>, handlers: {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      onEvent?: (event: { type: string; [key: string]: any }) => void;
+      onDone?: () => void;
+    }) => {
+      setIsRunning(true);
+      setIsVisible(true);
+      setEntries([]);
+      entryIdRef.current = 0;
+
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+
+        if (!res.ok || !res.body) {
+          addEntry("error", `请求失败: ${res.statusText}`);
+          setIsRunning(false);
+          return;
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            const dataLine = line.trim();
+            if (!dataLine.startsWith("data: ")) continue;
+            try {
+              const event = JSON.parse(dataLine.slice(6));
+              handlers.onEvent?.(event);
+            } catch {
+              // 忽略解析错误
+            }
+          }
+        }
+      } catch (error) {
+        addEntry("error", `连接错误: ${error instanceof Error ? error.message : "未知错误"}`);
+      } finally {
+        setIsRunning(false);
+        handlers.onDone?.();
+      }
+    },
+    [addEntry]
+  );
+
+  const close = useCallback(() => {
+    setIsVisible(false);
+    setEntries([]);
+  }, []);
+
+  return { isRunning, entries, isVisible, addEntry, startOperation, close };
+}
+
+/* ============================
+   Expand Dialog
+   ============================ */
+
+function ExpandDialog({
+  onConfirm,
+  onCancel,
+}: {
+  onConfirm: (scale: number, hint: string) => void;
+  onCancel: () => void;
+}) {
+  const [scale, setScale] = useState(0.5);
+  const [hint, setHint] = useState("");
+
+  const scaleOptions = [
+    { value: 0.5, label: "50%", desc: "小型扩展" },
+    { value: 1.0, label: "100%", desc: "中型扩展" },
+    { value: 2.0, label: "200%", desc: "大型扩展" },
+  ];
+
+  return (
+    <div
+      className="rounded-xl border border-accent/30 bg-surface p-4 space-y-4"
+      style={{ boxShadow: "var(--shadow-sm)" }}
+    >
+      <h3 className="text-sm font-semibold text-foreground">扩展区域</h3>
+
+      {/* 比例选择 */}
+      <div className="space-y-2">
+        <p className="text-[11px] text-muted">选择扩展比例</p>
+        <div className="flex gap-2">
+          {scaleOptions.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setScale(opt.value)}
+              className={`flex-1 rounded-lg border px-3 py-2 text-center transition-all ${
+                scale === opt.value
+                  ? "border-accent bg-accent/10 text-accent"
+                  : "border-border bg-background text-muted hover:border-accent/30"
+              }`}
+            >
+              <div className="text-sm font-bold">{opt.label}</div>
+              <div className="text-[10px] mt-0.5">{opt.desc}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* 方向提示 */}
+      <div className="space-y-1.5">
+        <p className="text-[11px] text-muted">扩展方向提示（可选）</p>
+        <input
+          type="text"
+          value={hint}
+          onChange={(e) => setHint(e.target.value)}
+          placeholder="如：向北扩展，增加一个渔村和地下洞穴..."
+          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs text-foreground placeholder:text-muted/50 focus:border-accent focus:outline-none"
+        />
+      </div>
+
+      {/* 操作按钮 */}
+      <div className="flex gap-2">
+        <button
+          onClick={onCancel}
+          className="flex-1 rounded-lg border border-border px-3 py-2 text-xs text-muted hover:bg-muted/5 transition-colors"
+        >
+          取消
+        </button>
+        <button
+          onClick={() => onConfirm(scale, hint)}
+          className="flex-1 rounded-lg bg-accent px-3 py-2 text-xs font-medium text-white hover:bg-accent-dim transition-colors"
+        >
+          开始扩展
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================
+   Area Action Bar
+   ============================ */
+
+function AreaActionBar({
+  areaId,
+  playerId,
+  disabled,
+  checkOp,
+  expandOp,
+  onAreaUpdated,
+}: {
+  areaId: string;
+  playerId: string;
+  disabled: boolean;
+  checkOp: ReturnType<typeof useSSEOperation>;
+  expandOp: ReturnType<typeof useSSEOperation>;
+  onAreaUpdated: () => void;
+}) {
+  const [showExpandDialog, setShowExpandDialog] = useState(false);
+
+  const handleCheck = () => {
+    checkOp.startOperation("/api/areas/check", { areaId, playerId }, {
+      onEvent: (event) => {
+        switch (event.type) {
+          case "checking":
+            checkOp.addEntry("info", event.message);
+            break;
+          case "issue":
+            checkOp.addEntry("issue", event.data?.description || "发现问题");
+            break;
+          case "fixing":
+            checkOp.addEntry("fix", event.message);
+            break;
+          case "fixed":
+            checkOp.addEntry("success", `已修复: ${event.data?.description || "节点数据"}`);
+            break;
+          case "summary": {
+            const s = event.data;
+            checkOp.addEntry(
+              "success",
+              `检查完成: 发现 ${s?.issuesFound ?? 0} 个问题，修复 ${s?.issuesFixed ?? 0} 处`
+            );
+            break;
+          }
+          case "error":
+            checkOp.addEntry("error", event.message);
+            break;
+        }
+      },
+      onDone: onAreaUpdated,
+    });
+  };
+
+  const handleExpand = (scale: number, hint: string) => {
+    setShowExpandDialog(false);
+    expandOp.startOperation("/api/areas/expand", { areaId, playerId, scale, hint }, {
+      onEvent: (event) => {
+        switch (event.type) {
+          case "analyzing":
+          case "planning":
+          case "connecting":
+            expandOp.addEntry("info", event.message);
+            break;
+          case "generating":
+            expandOp.addEntry("info", event.message);
+            break;
+          case "node_created":
+            expandOp.addEntry("node", `新节点: ${event.data?.name}（${event.data?.type}）`);
+            break;
+          case "summary": {
+            const s = event.data;
+            expandOp.addEntry(
+              "success",
+              `扩展完成: 新增 ${s?.newNodes ?? 0} 个节点, ${s?.newConnections ?? 0} 条连接`
+            );
+            break;
+          }
+          case "error":
+            expandOp.addEntry("error", event.message);
+            break;
+        }
+      },
+      onDone: onAreaUpdated,
+    });
+  };
+
+  const anyRunning = checkOp.isRunning || expandOp.isRunning;
+
+  return (
+    <div className="space-y-3">
+      {/* 操作按钮行 */}
+      <div className="flex gap-2">
+        <button
+          onClick={handleCheck}
+          disabled={disabled || anyRunning}
+          className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-xs font-medium text-foreground transition-all hover:border-accent/40 hover:bg-accent/5 disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{ boxShadow: "var(--shadow-sm)" }}
+        >
+          {checkOp.isRunning ? (
+            <>
+              <span className="h-2.5 w-2.5 animate-spin rounded-full border border-accent/30 border-t-accent" />
+              检查中...
+            </>
+          ) : (
+            <>🔍 检查完整性</>
+          )}
+        </button>
+
+        <button
+          onClick={() => setShowExpandDialog(!showExpandDialog)}
+          disabled={disabled || anyRunning}
+          className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-2 text-xs font-medium text-foreground transition-all hover:border-accent/40 hover:bg-accent/5 disabled:opacity-50 disabled:cursor-not-allowed"
+          style={{ boxShadow: "var(--shadow-sm)" }}
+        >
+          {expandOp.isRunning ? (
+            <>
+              <span className="h-2.5 w-2.5 animate-spin rounded-full border border-accent/30 border-t-accent" />
+              扩展中...
+            </>
+          ) : (
+            <>🌱 扩展区域</>
+          )}
+        </button>
+      </div>
+
+      {/* 扩展对话框 */}
+      {showExpandDialog && !anyRunning && (
+        <ExpandDialog
+          onConfirm={handleExpand}
+          onCancel={() => setShowExpandDialog(false)}
+        />
+      )}
+
+      {/* 检查进度面板 */}
+      {checkOp.isVisible && (
+        <ProgressPanel
+          title="完整性检查"
+          entries={checkOp.entries}
+          isRunning={checkOp.isRunning}
+          onClose={checkOp.close}
+        />
+      )}
+
+      {/* 扩展进度面板 */}
+      {expandOp.isVisible && (
+        <ProgressPanel
+          title="区域扩展"
+          entries={expandOp.entries}
+          isRunning={expandOp.isRunning}
+          onClose={expandOp.close}
+        />
+      )}
+    </div>
+  );
+}
+
+/** 区域详情视图（含移动功能 + 区域操作） */
 function AreaDetailView({
   areaId,
   playerId,
@@ -243,6 +668,9 @@ function AreaDetailView({
   const [expandedNode, setExpandedNode] = useState<string | null>(null);
   const [movingTo, setMovingTo] = useState<string | null>(null);
   const [moveError, setMoveError] = useState<string | null>(null);
+
+  const checkOp = useSSEOperation();
+  const expandOp = useSSEOperation();
 
   const loadArea = useCallback(() => {
     setLoading(true);
@@ -278,9 +706,7 @@ function AreaDetailView({
       });
       const data = await res.json();
       if (data.success) {
-        // 重新加载区域数据获取新的 currentNodeId
         loadArea();
-        // 触发外部动作（如刷新聊天），传递系统消息内容
         const { nodeName, nodeType, areaName, escapedBattle } = data.data || {};
         const typeStr = nodeType === "safe" ? "安全区" : nodeType === "battle" ? "区域" : "地点";
         const msg = `🤖 你移动到了${areaName || "未知区域"}的${typeStr}「${nodeName || "未知地点"}」。${escapedBattle ? "\n" + escapedBattle : ""}`;
@@ -348,6 +774,16 @@ function AreaDetailView({
           </div>
           <p className="mt-2 text-sm leading-relaxed text-foreground/80">{area.description}</p>
         </div>
+
+        {/* 区域操作栏 */}
+        <AreaActionBar
+          areaId={areaId}
+          playerId={playerId}
+          disabled={false}
+          checkOp={checkOp}
+          expandOp={expandOp}
+          onAreaUpdated={loadArea}
+        />
 
         {/* 移动错误提示 */}
         {moveError && (

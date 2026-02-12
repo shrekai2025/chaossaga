@@ -1,0 +1,52 @@
+DATABASE_URL: postgresql://postgres.vfnkmxgplyzwlebfttsj:Aa2885828Ai@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
+Starting Barter Test...
+Found NPC: 老渔夫阿海 (ID: npc-fisherman-ahai) in Area: 珊瑚海湾
+Updated Test Player Position: cmlisxvbg0000a832vzx8pu9e
+Added Item: Broken Crab Shell
+Executing Exchange...
+Exchange Result: {
+  "success": true,
+  "data": {
+    "action": "exchange_completed",
+    "npcName": "老渔夫阿海",
+    "gave": "Broken Crab Shell x1",
+    "received": "Dried Mushroom x3"
+  }
+}
+Inventory Check:
+✅ Broken Crab Shell removed (or qty 0).
+✅ Received 3 Dried Mushrooms.
+PrismaClientKnownRequestError: 
+Invalid `prisma.player.delete()` invocation in
+/Users/uniteyoo/Documents/chaossaga/scripts/test-npc-exchange.ts:119:23
+
+  116 }
+  117 
+  118 // Clean up
+→ 119 await prisma.player.delete(
+Foreign key constraint violated on the constraint: `InventoryItem_playerId_fkey`
+    at Vr.handleRequestError (/Users/uniteyoo/Documents/chaossaga/node_modules/@prisma/client/src/runtime/RequestHandler.ts:228:13)
+    at Vr.handleAndLogRequestError (/Users/uniteyoo/Documents/chaossaga/node_modules/@prisma/client/src/runtime/RequestHandler.ts:174:12)
+    at Vr.request (/Users/uniteyoo/Documents/chaossaga/node_modules/@prisma/client/src/runtime/RequestHandler.ts:143:12)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async a (/Users/uniteyoo/Documents/chaossaga/node_modules/@prisma/client/src/runtime/getPrismaClient.ts:805:24)
+    at async main (/Users/uniteyoo/Documents/chaossaga/scripts/test-npc-exchange.ts:119:3) {
+  code: 'P2003',
+  meta: {
+    modelName: 'Player',
+    driverAdapterError: DriverAdapterError: ForeignKeyConstraintViolation
+        at PrismaPgAdapter.onError (/Users/uniteyoo/Documents/chaossaga/node_modules/@prisma/adapter-pg/dist/index.js:687:11)
+        at PrismaPgAdapter.performIO (/Users/uniteyoo/Documents/chaossaga/node_modules/@prisma/adapter-pg/dist/index.js:682:12)
+        at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+        at async PrismaPgAdapter.queryRaw (/Users/uniteyoo/Documents/chaossaga/node_modules/@prisma/adapter-pg/dist/index.js:602:30)
+        at async e.interpretNode (/Users/uniteyoo/Documents/chaossaga/node_modules/@prisma/client-engine-runtime/src/interpreter/query-interpreter.ts:182:26)
+        at async e.interpretNode (/Users/uniteyoo/Documents/chaossaga/node_modules/@prisma/client-engine-runtime/src/interpreter/query-interpreter.ts:209:41)
+        at async e.interpretNode (/Users/uniteyoo/Documents/chaossaga/node_modules/@prisma/client-engine-runtime/src/interpreter/query-interpreter.ts:124:29)
+        at async e.interpretNode (/Users/uniteyoo/Documents/chaossaga/node_modules/@prisma/client-engine-runtime/src/interpreter/query-interpreter.ts:268:41)
+        at async e.run (/Users/uniteyoo/Documents/chaossaga/node_modules/@prisma/client-engine-runtime/src/interpreter/query-interpreter.ts:93:23)
+        at async e.execute (/Users/uniteyoo/Documents/chaossaga/node_modules/@prisma/client/src/runtime/core/engines/client/LocalExecutor.ts:81:12) {
+      cause: [Object]
+    }
+  },
+  clientVersion: '7.3.0'
+}

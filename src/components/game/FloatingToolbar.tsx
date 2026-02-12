@@ -215,12 +215,10 @@ export default function FloatingToolbar({
   playerId,
   onSendCommand,
   onSystemAction,
-  isBattle,
 }: {
   playerId: string;
   onSendCommand?: (cmd: string) => void;
   onSystemAction?: (msg?: string) => void;
-  isBattle?: boolean;
 }) {
   const [activePanel, setActivePanel] = useState<PanelId>(null);
 
@@ -232,18 +230,6 @@ export default function FloatingToolbar({
     <>
       {/* 工具栏按钮组 */}
       <div className="fixed top-[46px] right-3 z-40 flex items-center gap-2">
-        {/* 战斗状态指示器 (移动按钮左侧) */}
-        <div
-          className={`flex h-7 items-center gap-1 rounded-full border px-2.5 text-[10px] shadow-sm transition-colors ${
-            isBattle
-              ? "border-red-500/30 bg-red-500/10 text-red-500"
-              : "border-emerald-500/30 bg-emerald-500/10 text-emerald-600"
-          }`}
-        >
-          <span className={`h-1.5 w-1.5 rounded-full ${isBattle ? "bg-red-500 animate-pulse" : "bg-emerald-500"}`} />
-          <span>{isBattle ? "战斗中" : "未战斗"}</span>
-        </div>
-
         <div className="flex items-center gap-1">
           {TOOLBAR_BUTTONS.map((btn) => (
             <button

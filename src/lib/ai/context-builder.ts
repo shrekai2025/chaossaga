@@ -322,6 +322,7 @@ export async function buildGameContext(playerId: string, isBattle = false): Prom
               name: true,
               type: true,
               description: true,
+              data: true, // 🆕 添加 data 字段以提取 NPCs 和商店信息
               connections: {
                 select: { toNode: { select: { name: true, type: true } } },
               },
@@ -331,44 +332,36 @@ export async function buildGameContext(playerId: string, isBattle = false): Prom
     ]);
   }
 
-  // 提取任务相关的 NPC 位置信息
-  const questNpcIds = playerData.quests
-    .map((pq) => pq.quest.npcId)
-    .filter((id): id is string => !!id);
+  // ========== 区域任务隔离：只注入当前区域的活跃任务 ==========
+  // 核心规则：A 区任务只在 A 区对话中可见，到 B 区后 AI 看不到 A 区任务
+  const currentAreaId = playerData.currentAreaId;
+  const currentAreaQuests = playerData.quests.filter((pq) => {
+    // 玩家不在任何区域（理论上不应该发生），显示全部
+    if (!currentAreaId) return true;
 
-  let npcLocations: Record<string, string> = {};
-  if (questNpcIds.length > 0) {
-    // 查找包含这些 NPC 的节点
-    // 注意：Prisma JSON 过滤性能可能一般，但任务 NPC 数量很少，可接受
-    const nodes = await prisma.areaNode.findMany({
-      where: {
-        OR: questNpcIds.map(id => ({
-          data: {
-            path: ['npc', 'id'],
-            equals: id
-          }
-        }))
-      },
-      select: {
-        id: true,
-        data: true,
-        area: { select: { name: true } }
-      }
-    });
-
-    // 构建 NPC ID -> 区域名称 的映射
-    for (const node of nodes) {
-      const data = node.data as { npc?: { id: string } };
-      if (data?.npc?.id) {
-        npcLocations[data.npc.id] = node.area.name;
-      }
+    // 方案1（推荐）：使用 Quest.areaId 字段判断（新创建的任务都有此字段）
+    const questAreaId = (pq.quest as { areaId?: string | null }).areaId;
+    if (questAreaId) {
+      return questAreaId === currentAreaId;
     }
-  }
+
+    // 方案2（兼容）：旧任务无 areaId，通过 progress 中的 acceptedAreaId 推断
+    const acceptedAreaId = extractAcceptedAreaId(pq.progress);
+    if (acceptedAreaId) {
+      return acceptedAreaId === currentAreaId;
+    }
+
+    // 方案3（最终兜底）：无法判断区域的旧任务，默认不显示，防止跨区域泄漏
+    // 如果旧任务需要显示，可通过 /gm 指令手动处理
+    return false;
+  });
+
+  const npcLocations: Record<string, string> = {};
 
   // 构建摘要字符串（保持原有格式）
   const playerState = buildPlayerStateSummary(playerData, areaData, currentNode);
   const areaInfo = isBattle ? "战斗中" : buildAreaInfoSummary(areaData, currentNode);
-  const activeQuests = buildActiveQuestsSummary(playerData.quests, npcLocations);
+  const activeQuests = buildActiveQuestsSummary(currentAreaQuests, npcLocations);
   const activeBattle = buildActiveBattleSummary(battleState);
   const specialEffects = isBattle ? "无" : buildSpecialEffectsSummary(playerData.inventory);
   const historyMessages = history.reverse().map((r) => ({
@@ -451,6 +444,7 @@ function buildAreaInfoSummary(
     name: string;
     type: string;
     description: string;
+    data?: unknown;
     connections: Array<{ toNode: { name: string; type: string } }>;
   } | null
 ): string {
@@ -462,11 +456,38 @@ function buildAreaInfoSummary(
     ? node.connections.map((c) => `${c.toNode.name}(${c.toNode.type})`).join("、") || "无"
     : "无";
 
+  // 🆕 提取当前节点的 NPCs 和商店信息
+  let npcInfo = "";
+  if (node?.data) {
+    const nodeData = node.data as Record<string, unknown>;
+
+    // NPCs 列表
+    const npcs = nodeData.npcs as Array<{ id?: string; name?: string; role?: string }> | undefined;
+    if (npcs && Array.isArray(npcs) && npcs.length > 0) {
+      const npcList = npcs.map(npc => {
+        const roleDesc = npc.role ? `（${npc.role}）` : "";
+        return `  - ${npc.name}${roleDesc}`;
+      }).join("\n");
+      npcInfo += `\n可交互 NPC:\n${npcList}`;
+    }
+
+    // 商店物品
+    const shopItems = nodeData.shopItems as Array<{ name: string; price: number; type: string }> | undefined;
+    if (shopItems && Array.isArray(shopItems) && shopItems.length > 0) {
+      const itemList = shopItems.slice(0, 5).map(item =>
+        `  - ${item.name}（${item.type}，${item.price}金币）`
+      ).join("\n");
+      const moreItems = shopItems.length > 5 ? `\n  ...还有${shopItems.length - 5}件商品` : "";
+      npcInfo += `\n商店物品:\n${itemList}${moreItems}`;
+    }
+  }
+
   return [
     `区域: ${area.name}（${area.theme}，推荐Lv.${area.recommendedLevel}）`,
     `当前节点: ${currentNodeName} — ${currentNodeDesc}`,
     `可前往: ${adjacentStr}`,
-  ].join("\n");
+    npcInfo,
+  ].filter(s => s).join("\n");
 }
 
 function buildActiveQuestsSummary(
@@ -479,9 +500,9 @@ function buildActiveQuestsSummary(
     };
     progress: unknown;
   }>,
-  npcLocations: Record<string, string> = {}
+  _npcLocations: Record<string, string> = {}
 ): string {
-  if (quests.length === 0) return "无";
+  if (quests.length === 0) return "无（当前区域没有进行中的任务）";
 
   return quests
     .map((pq) => {
@@ -502,15 +523,26 @@ function buildActiveQuestsSummary(
         })
         .join("\n");
 
-      // 添加 NPC 位置提示
-      let locationHint = "";
-      if (pq.quest.npcId && npcLocations[pq.quest.npcId]) {
-        locationHint = ` (交付人位于: ${npcLocations[pq.quest.npcId]})`;
-      }
-
-      return `📜 ${pq.quest.name}（${pq.quest.type}）${locationHint}\n${objList}`;
+      return `📜 ${pq.quest.name}（${pq.quest.type}）\n${objList}`;
     })
     .join("\n\n");
+}
+
+function extractAcceptedAreaId(progress: unknown): string | null {
+  if (!Array.isArray(progress)) return null;
+
+  for (const entry of progress) {
+    if (
+      entry &&
+      typeof entry === "object" &&
+      "acceptedAreaId" in entry &&
+      typeof (entry as { acceptedAreaId?: unknown }).acceptedAreaId === "string"
+    ) {
+      return (entry as { acceptedAreaId: string }).acceptedAreaId;
+    }
+  }
+
+  return null;
 }
 
 function buildActiveBattleSummary(

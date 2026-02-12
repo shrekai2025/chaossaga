@@ -44,8 +44,8 @@ export const generateToolDefinitions: NormalizedTool[] = [
                 description:
                   "节点数据，按 type 填写：" +
                   "battle → { enemyTemplates: [{ name, level, element, minCount, maxCount, description }] }；" +
-                  "npc → { npc: { id, name, role, personality, greeting, dialogTopics } }；" +
-                  "shop → { npc: { id, name, role, greeting }, shopItems: [{ name, type, quality, price, stats, description }] }；" +
+                  "npc → { npcs: [{ id, name, role, personality, greeting, dialogTopics }] }（注意：使用 npcs 数组，如缺失会自动创建）；" +
+                  "shop → { npcs: [{ id, name, role, greeting }], shopItems: [{ name, type, quality, price, stats, description }] }（注意：npcs 数组如缺失会自动创建默认掌柜）；" +
                   "boss → { boss: { name, level, element, description, hp, attack, defense, speed, skills: [{ name, damage, element, type: attack|heal|buff|aoe, description }], phases: [{ hpThreshold, unlockedSkills, description }], drops: [{ name, type, quality, stats?, chance, skillData?: { element, damage, mpCost, cooldown, effect? } }] } }。" +
                   "⚠️ BOSS 的 drops 数组中**必须包含至少一个 type='skill' 的技能掉落**，该技能必须与区域主题相关（如 ocean→water, forest→wind/earth, desert→fire/earth, cave→earth/dark）；" +
                   "event → { events: [{ id, name, type, description, reward?, loot? }] }；" +
@@ -67,7 +67,7 @@ export const generateToolDefinitions: NormalizedTool[] = [
   {
     name: "create_quest",
     description:
-      "在NPC对话中动态创建一个任务。可以是采集、击杀、解谜、护送、探索类型",
+      "在NPC对话中动态创建一个任务（定义任务内容，不自动接取）。可以是采集、击杀、解谜、护送、探索类型。创建后需等待玩家同意，再调用 interact_npc(accept_quest) 接取。",
     parameters: {
       type: "object",
       properties: {
@@ -183,6 +183,32 @@ export async function generateArea(
   const nodeIdMap: Record<string, string> = {};
   for (let i = 0; i < nodesInput.length; i++) {
     const n = nodesInput[i];
+
+    // 🆕 数据规范化：确保 shop 和 npc 节点有正确的 NPC 配置
+    let nodeData = n.data ?? {};
+
+    if (n.type === 'shop' || n.type === 'npc') {
+      // 检查是否有 npcs 数组（新格式）
+      if (!nodeData.npcs || !Array.isArray(nodeData.npcs) || nodeData.npcs.length === 0) {
+        // 检查是否有旧格式的 npc 对象
+        if (nodeData.npc && typeof nodeData.npc === 'object') {
+          // 转换旧格式到新格式
+          nodeData.npcs = [nodeData.npc];
+          console.log(`[generate_area] 转换节点 ${n.name} 的 NPC 格式: npc -> npcs`);
+        } else {
+          // 完全缺失 NPC，自动创建默认 NPC
+          const defaultNpc = {
+            id: `${n.id}_npc`,
+            name: n.type === 'shop' ? `${n.name}掌柜` : `${n.name}的居民`,
+            role: n.type === 'shop' ? 'shopkeeper' : 'villager',
+            greeting: n.type === 'shop' ? '欢迎光临，看看有什么需要的。' : '你好，旅行者。',
+          };
+          nodeData.npcs = [defaultNpc];
+          console.log(`[generate_area] 自动为节点 ${n.name} 创建默认 NPC: ${defaultNpc.name}`);
+        }
+      }
+    }
+
     const node = await prisma.areaNode.create({
       data: {
         areaId: area.id,
@@ -190,7 +216,7 @@ export async function generateArea(
         type: n.type,
         description: n.description,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        data: (n.data ?? {}) as any,
+        data: nodeData as any,
         posX: i % 4,
         posY: Math.floor(i / 4),
       },
@@ -267,12 +293,20 @@ export async function createQuest(
   const rewards = args.rewards as Record<string, unknown>;
   const specialCondition = args.specialCondition as string | undefined;
 
+  // 自动绑定任务到玩家当前所在区域（区域隔离：任务只能在创建区域中可见和完成）
+  const player = await prisma.player.findUnique({
+    where: { id: playerId },
+    select: { currentAreaId: true },
+  });
+  const questAreaId = player?.currentAreaId ?? undefined;
+
   const quest = await prisma.quest.create({
     data: {
       name,
       description,
       type,
       npcId: args.npcId as string | undefined,
+      areaId: questAreaId,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       objectives: objectives as any,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -281,17 +315,9 @@ export async function createQuest(
     },
   });
 
-  // 自动为玩家接取任务
-  const initialProgress = objectives.map(() => ({ currentCount: 0, completed: false }));
-  await prisma.playerQuest.create({
-    data: {
-      playerId,
-      questId: quest.id,
-      status: "active",
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      progress: initialProgress as any,
-    },
-  });
+  // 自动为玩家接取任务 -> ❌ 移除自动接取，必须由玩家在对话中明确接受后调用 interact_npc(accept_quest)
+  // const initialProgress = objectives.map(() => ({ currentCount: 0, completed: false }));
+  // await prisma.playerQuest.create({ ... });
 
   return {
     success: true,

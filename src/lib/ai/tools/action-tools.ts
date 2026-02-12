@@ -94,18 +94,18 @@ export const actionToolDefinitions: NormalizedTool[] = [
   {
     name: "interact_npc",
     description:
-      "与NPC交互。支持对话(talk)、购买物品(buy)、出售物品(sell)、治疗(heal)、训练(train)、接取任务(accept_quest)、提交任务(submit_quest)。购买需在data中指定itemName和quantity。任务相关需在data中指定questId（可选，若NPC只有一个任务可省略）",
+      "与NPC交互。支持对话(talk)、购买物品(buy)、出售物品(sell)、以物易物(exchange)、治疗(heal)、训练(train)、接取任务(accept_quest)、提交任务(submit_quest)。\nbuy: data={itemName, quantity}\nsell: data={itemId}\nexchange: data={ give: [{itemId, quantity}], receive: [{name, type, ...}] } // 类似add_item的物品结构\ntrain: data={skillId}\nquest: data={questId}",
     parameters: {
       type: "object",
       properties: {
         npcId: { type: "string", description: "NPC ID 或 名称" },
         action: {
           type: "string",
-          enum: ["talk", "buy", "sell", "heal", "train", "accept_quest", "submit_quest"],
+          enum: ["talk", "buy", "sell", "exchange", "heal", "train", "accept_quest", "submit_quest"],
         },
         data: {
           type: "object",
-          description: "附加数据。buy: {itemName, quantity}, sell: {itemId}, train: {skillId}, quest: {questId}",
+          description: "附加数据。buy: {itemName, quantity}, sell: {itemId}, exchange: {give:[{itemId, quantity}], receive:[{name, type, quality, quantity, stats, specialEffect}]}, train: {skillId}, quest: {questId}",
         },
       },
       required: ["npcId", "action"],
@@ -1166,6 +1166,91 @@ export async function interactNpc(
     };
   }
 
+  // ---- exchange: 以物易物 ----
+  if (action === "exchange") {
+    // 1. 解析参数
+    const giveDetails = actionData?.give as Array<{ itemId: string; quantity?: number }> | undefined;
+    const receiveDetails = actionData?.receive as Array<{
+      name: string; type: string; quality?: string; quantity?: number;
+      stats?: Record<string, unknown>; specialEffect?: string;
+    }> | undefined;
+
+    if (!giveDetails || !Array.isArray(giveDetails) || giveDetails.length === 0) {
+      return { success: false, error: "缺少 give 参数 (玩家需要付出的物品)" };
+    }
+    if (!receiveDetails || !Array.isArray(receiveDetails) || receiveDetails.length === 0) {
+      return { success: false, error: "缺少 receive 参数 (玩家将获得的物品)" };
+    }
+
+    // 2. 验证玩家是否拥有足够的物品
+    const itemsToRemove: Array<{ dbItem: { id: string, quantity: number, name: string }, removeQty: number }> = [];
+
+    for (const give of giveDetails) {
+       // 使用 resolveItem 查找物品 (支持部分匹配，但为了安全最好用ID)
+       const resolved = await resolveItem(give.itemId, playerId);
+       if (!resolved.found) return { success: false, error: resolved.error };
+       const item = resolved.record;
+
+       const qtyNeeded = give.quantity || 1;
+       if (item.quantity < qtyNeeded) {
+         return { success: false, error: `物品不足：${item.name} (需要 ${qtyNeeded}, 拥有 ${item.quantity})` };
+       }
+       itemsToRemove.push({ dbItem: item, removeQty: qtyNeeded });
+    }
+
+    // 3. 执行扣除
+    for (const { dbItem, removeQty } of itemsToRemove) {
+      if (dbItem.quantity <= removeQty) { // 应该相等，除非有并发修改
+        await prisma.inventoryItem.delete({ where: { id: dbItem.id } });
+      } else {
+        await prisma.inventoryItem.update({
+          where: { id: dbItem.id },
+          data: { quantity: { decrement: removeQty } },
+        });
+      }
+    }
+
+    // 4. 执行给予
+    const addedItems: string[] = [];
+    for (const receive of receiveDetails) {
+      await prisma.inventoryItem.create({
+        data: {
+          playerId,
+          name: receive.name,
+          type: receive.type,
+          quality: receive.quality || "common",
+          quantity: receive.quantity || 1,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          stats: (receive.stats ?? undefined) as any,
+          specialEffect: receive.specialEffect,
+        },
+      });
+      addedItems.push(`${receive.name} x${receive.quantity || 1}`);
+    }
+
+    // 5. 记录日志
+    const giveStr = itemsToRemove.map(i => `${i.dbItem.name} x${i.removeQty}`).join(", ");
+    const receiveStr = addedItems.join(", ");
+    
+    await logPlayerAction(
+      playerId,
+      "trade",
+      `与 ${npcData.name} 交换：失去 [${giveStr}]，获得 [${receiveStr}]`,
+      { npcId: npcData.id, give: giveStr, receive: receiveStr }
+    );
+
+    return {
+      success: true,
+      data: {
+        action: "exchange_completed",
+        npcName: npcData.name,
+        gave: giveStr,
+        received: receiveStr,
+      },
+      // stateUpdate 这里比较复杂，暂不更新详细 inventory 列表，前端通常会自动重拉或通过 events 更新
+    };
+  }
+
   // ---- accept_quest: 接取任务 ----
   if (action === "accept_quest") {
     const questId = (actionData?.questId as string) || (npcData.questId as string);
@@ -1174,7 +1259,7 @@ export async function interactNpc(
     }
 
     const quest = await prisma.quest.findUnique({ where: { id: questId } });
-    if (!quest) return { success: false, error: "任务不存在" };
+    if (!quest) return { success: false, error: "任务不存在。如果这是NPC新发布的任务，请先调用 create_quest 工具创建任务，然后再让玩家接取。" };
 
     // 检查是否已接取
     const existing = await prisma.playerQuest.findUnique({

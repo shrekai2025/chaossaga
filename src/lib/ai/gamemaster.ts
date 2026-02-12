@@ -14,9 +14,14 @@ import {
   getSystemPrompt,
   buildContextInjection,
 } from "./system-prompt";
-import { BATTLE_TOOLS, EXPLORATION_TOOLS, executeToolCall } from "./tools";
+import { BATTLE_TOOLS, EXPLORATION_TOOLS, GM_TOOLS, executeToolCall } from "./tools";
 import { buildGameContext } from "./context-builder";
 import { prisma } from "@/lib/db/prisma";
+import {
+  StreamingJSONParser,
+  parseAsPlainText,
+  type StructuredResponse
+} from "./structured-response";
 
 /** Game Master 上下文 */
 interface GameMasterContext {
@@ -57,72 +62,6 @@ async function saveChatHistory(
       metadata: (metadata ?? undefined) as any,
     },
   });
-}
-
-/**
- * 从 AI 文本末尾提取快捷按钮，并返回去掉按钮行后的正文
- */
-function extractActions(
-  text: string
-): { actions: Array<{ label: string; value: string }>; cleanText: string } | null {
-  const lines = text.split("\n");
-  const matches: Array<{ label: string; value: string }> = [];
-
-  // 列表选项行：- [xxx] 或 - **[xxx]** 开头（后面可跟描述）
-  const listOptionRegex = /^[-*•]\s+(?:\*\*)?[【\[]([^\]】]{1,50})[】\]](?:\*\*)?/;
-  // 纯选项行：整行主要由 [xxx] 或 **[xxx]** 组成
-  const inlineOptionRegex = /(?:\*\*)?[【\[]([^\]】]{1,50})[】\]](?:\*\*)?/g;
-  // 选项标题行（如「你想做什么？」「请选择：」）—— 跳过但继续扫描
-  const promptLineRegex = /^\*\*.*[？?：:]\s*\*\*$|^.*[？?：:]$/;
-
-  let cutIndex = lines.length; // 将要截断的行索引
-
-  // 从末尾向前扫描
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue; // 跳过空行
-
-    // 优先匹配列表选项（- [xxx] — 描述）
-    const listMatch = line.match(listOptionRegex);
-    if (listMatch) {
-      matches.unshift({ label: listMatch[1], value: listMatch[1] });
-      cutIndex = i;
-      continue;
-    }
-
-    // 匹配行内所有 [xxx] 或 **[xxx]**
-    const lineMatches: Array<{ label: string; value: string }> = [];
-    let m;
-    const regex = new RegExp(inlineOptionRegex.source, 'g');
-    while ((m = regex.exec(line)) !== null) {
-      lineMatches.push({ label: m[1], value: m[1] });
-    }
-
-    if (lineMatches.length > 0) {
-      // 移除所有选项后，检查剩余内容
-      const nonOptionContent = line.replace(inlineOptionRegex, '').replace(/[\s*-—·•]+/g, '').trim();
-      if (nonOptionContent.length <= lineMatches.reduce((s, o) => s + o.label.length, 0)) {
-        matches.unshift(...lineMatches);
-        cutIndex = i;
-        continue;
-      }
-    }
-
-    // 选项标题行（继续向上扫描）
-    if (promptLineRegex.test(line) && matches.length > 0) {
-      cutIndex = i;
-      continue;
-    }
-
-    // 其他内容行，停止扫描
-    break;
-  }
-
-  if (matches.length === 0) return null;
-
-  // 构建去掉选项行后的正文
-  const cleanText = lines.slice(0, cutIndex).join("\n").trimEnd();
-  return { actions: matches, cleanText };
 }
 
 /** SSE 编码辅助 */
@@ -185,6 +124,7 @@ export async function processGameMessage(
             select: { status: true },
           });
           const isBattle = activeBattle?.status === "active";
+          const isGM = !isBattle && ctx.message?.trim().toLowerCase().startsWith("/gm");
 
           const gameCtx = await buildGameContext(ctx.playerId, isBattle);
 
@@ -197,7 +137,7 @@ export async function processGameMessage(
           });
 
           const systemPrompt =
-            getSystemPrompt(isBattle) + "\n" + contextInjection;
+            getSystemPrompt(isBattle, isGM) + "\n" + contextInjection;
 
           // 3. 构建消息列表（历史 + 当前消息）
           console.log(`[GameMaster] 步骤3: 构建消息列表 (历史: ${gameCtx.history.length} 条)`);
@@ -273,53 +213,96 @@ export async function processGameMessage(
             return JSON.stringify(result);
           };
 
+
+          // 变量用于跨循环保存元数据
+          let debugMetadata: Record<string, unknown> | undefined;
+
           try {
               // We wrap the generation in a loop to allow for self-correction
               while (remainingRetries >= 0) {
+                 // 🆕 初始化 JSON 解析器
+                 const jsonParser = new StreamingJSONParser();
+                 let lastNarrativeLength = 0;
+
                  let textBuffer = "";
                  let isBuffering = true; // Enable buffering for ALL modes
                  const BUFFER_LIMIT = 120; // [Optimization] 增加缓冲区大小以捕获更长的起手式
+
+                 // 🆕 工具集选择逻辑：
+                 // - 战斗模式：使用 BATTLE_TOOLS
+                 // - GM指令：仅当消息以 "/gm" 开头时，混合 EXPLORATION + GM 工具
+                 // - 普通探索：仅使用 EXPLORATION_TOOLS
+                 let tools = isBattle ? BATTLE_TOOLS : EXPLORATION_TOOLS;
                  
+                 if (!isBattle && ctx.message?.trim().toLowerCase().startsWith("/gm")) {
+                    tools = [...EXPLORATION_TOOLS, ...GM_TOOLS];
+                    console.log("[GameMaster] 激活 GM 工具模式");
+                 }
+
                  const stream = client.chatStreamWithTools(
                    {
                      model: config.model,
                      systemPrompt,
-                     messages, 
-                     tools: isBattle ? BATTLE_TOOLS : EXPLORATION_TOOLS,
+                     messages,
+                     tools, // 使用动态选择的工具集
                      temperature: config.temperature,
                      maxTokens: config.maxTokens,
                    },
                    toolExecutor
                  );
-         
-                 let passText = ""; 
+
+                 let passText = "";
+                 let rawJsonBuffer = ""; // 🆕 原始 JSON 文本缓冲区
 
                  for await (const event of stream) {
                    if (event.type === "text") {
                      const content = event.content;
-                     
-                     if (isBuffering) {
-                       textBuffer += content;
-                       if (textBuffer.length > BUFFER_LIMIT) {
-                         await send({ type: "text", data: { content: textBuffer } });
-                         passText += textBuffer;
-                         fullText += textBuffer;
-                         textBuffer = "";
-                         isBuffering = false; 
+                     rawJsonBuffer += content; // 🆕 累积原始 JSON
+
+                     // 🆕 尝试解析 JSON 增量
+                     const updates = jsonParser.append(content);
+
+                     if (updates?.narrative) {
+                       // 计算新增的叙事文本
+                       const currentLength = updates.narrative.length;
+                       if (currentLength > lastNarrativeLength) {
+                         const newText = updates.narrative.slice(lastNarrativeLength);
+
+                         if (isBuffering) {
+                           textBuffer += newText;
+                           if (textBuffer.length > BUFFER_LIMIT) {
+                             await send({ type: "text", data: { content: textBuffer } });
+                             passText += textBuffer;
+                             fullText += textBuffer;
+                             textBuffer = "";
+                             isBuffering = false;
+                             hasSentRealData = true; // 文本已发给前端，禁止整体重试
+                           }
+                         } else {
+                           await send({ type: "text", data: { content: newText } });
+                           passText += newText;
+                           fullText += newText;
+                           hasSentRealData = true; // 文本已发给前端，禁止整体重试
+                         }
+
+                         lastNarrativeLength = currentLength;
                        }
-                     } else {
-                       await send({ type: "text", data: { content } });
-                       passText += content;
-                       fullText += content;
                      }
-         
+
+                     // 🆕 处理 thought 字段（可选显示）
+                     if (updates?.thought) {
+                       console.log(`[GameMaster] AI Thought: ${updates.thought}`);
+                       // 可选：发送 thinking 事件显示给用户
+                       // await send({ type: "thinking", data: { message: updates.thought } });
+                     }
+
                    } else if ("type" in event && event.type === "tool_call_start") {
                      if (isBuffering) {
                        // [Optimization] 关键修复：检测到工具调用时，直接丢弃缓冲区内的"起手式"文本
                        // 这样用户就不会看到 "我准备攻击..." 这种废话
                        console.log(`[GameMaster] 检测到工具调用，清空起手式文本 (${textBuffer.length}字): "${textBuffer.slice(0, 20)}..."`);
                        textBuffer = "";
-                       isBuffering = false; 
+                       isBuffering = false;
                      } else {
                        console.log(`[GameMaster] 工具调用开始，已输出文本`);
                      }
@@ -332,21 +315,127 @@ export async function processGameMessage(
                         passText += textBuffer;
                         fullText += textBuffer;
                         textBuffer = "";
+                        hasSentRealData = true;
                      }
-                     
+
                      if ("stopReason" in event && (event as any).stopReason === "max_tokens") {
                        console.warn("[GameMaster] 响应被 max_tokens 截断");
                      }
                    }
                  }
 
+                 // 🆕 流结束后，尝试最终解析
+                 const finalResponse = jsonParser.finalize();
+
+                 // 保存调试元数据
+                 debugMetadata = {
+                    rawJson: rawJsonBuffer,
+                    structured: finalResponse || null,
+                    toolCalls: Array.from(collectedTools)
+                 };
+
+                 if (finalResponse) {
+                   console.log(`[GameMaster] JSON 解析成功: narrative=${finalResponse.narrative.length}字, suggestions=${finalResponse.suggestions?.length || 0}个`);
+
+                   // 发送 suggestions（如果有）
+                   if (finalResponse.suggestions && finalResponse.suggestions.length > 0) {
+                     await send({
+                       type: "actions",
+                       data: {
+                         actions: finalResponse.suggestions.map(s => ({ label: s, value: s }))
+                       }
+                     });
+                   }
+
+                   // 使用解析后的 narrative 作为最终文本
+                   fullText = finalResponse.narrative;
+                 } else {
+                   // 🆕 JSON 解析失败，回退到纯文本解析
+                   console.warn(`[GameMaster] JSON 解析失败，使用纯文本回退。原始内容: ${rawJsonBuffer.slice(0, 200)}...`);
+
+                   // 1. 先尝试通过正则提取 thought (作为备用)
+                   let thoughtContent = null;
+                   if (rawJsonBuffer) {
+                      const match = rawJsonBuffer.match(/"thought"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+                      if (match) {
+                          thoughtContent = match[1]; 
+                      }
+                   }
+
+                   const fallback = parseAsPlainText(rawJsonBuffer || passText);
+                   let fallbackText = fallback.narrative;
+
+                   // 2. 检查 fallbackText 是否只是原始 JSON 字符串
+                   // 如果 AI 输出了 {"thought": "..."} 但没输出 narrative，parseAsPlainText 会把整个 JSON 当作文本
+                   const isRawJSON = fallbackText.trim().startsWith("{") && fallbackText.includes('"thought"');
+                   
+                   if (isRawJSON && thoughtContent) {
+                       console.warn("[GameMaster] 检测到原始 JSON 文本，转换为 thought 显示");
+                       fallbackText = `(AI 思考中: ${thoughtContent})`;
+                   }
+
+                   // 如果回退解析出了 suggestions，发送它们
+                   if (fallback.suggestions && fallback.suggestions.length > 0) {
+                     await send({
+                       type: "actions",
+                       data: {
+                         actions: fallback.suggestions.map(s => ({ label: s, value: s }))
+                       }
+                     });
+                   }
+
+                   fullText = fallbackText;
+                   
+                   // 关键修复：必须将回退的文本发送给前端
+                   if (fullText && fullText !== passText) {
+                       await send({ type: "text", data: { content: fullText } });
+                   } else if (!passText && fullText) {
+                       await send({ type: "text", data: { content: fullText } });
+                   }
+                 }
+
+                 // 🆕 [Fix] 如果最终文本为空（或者上面处理后仍为空），再次检查 thought
+                 if (!fullText && finalResponse?.thought) {
+                   const thoughtFallback = `(AI 思考中: ${finalResponse.thought})`;
+                   console.warn("[GameMaster] 检测到 narrative 为空，使用 thought 回退 (Clean Path)");
+                   await send({ type: "text", data: { content: thoughtFallback } });
+                   fullText = thoughtFallback;
+                 } else if (!fullText && collectedTools.size === 0) {
+                     const emptyFallback = "...";
+                     await send({ type: "text", data: { content: emptyFallback } });
+                     fullText = emptyFallback;
+                 }
+
                  // --- AUDIT PHASE ---
                  const { detectHallucinations } = await import("./hallucination-detector");
                  const audit = detectHallucinations(passText, Array.from(collectedTools), isBattle);
-                 
+
+                 // 🆕 检测"思考瘫痪"状态：LLM 说要调用工具但实际没调用
+                 const isThinkingParalysis =
+                   remainingRetries < 1 && // 已经重试过至少一次
+                   collectedTools.size === 0 && // 没有调用任何工具
+                   passText.length < 50 && // 几乎没有生成叙事
+                   finalResponse?.thought && // 但有 thought 字段
+                   (finalResponse.thought.includes("调用") || finalResponse.thought.includes("工具") || finalResponse.thought.includes("tool"));
+
+                 if (isThinkingParalysis) {
+                    console.warn(`[GameMaster] ⚠️ 检测到思考瘫痪: LLM 说要调用工具但没有实际执行。强制要求执行...`);
+
+                    await send({ type: "thinking", data: { message: "正在执行操作..." } });
+
+                    messages.push({ role: "assistant", content: fullText });
+                    messages.push({
+                        role: "user",
+                        content: `[CRITICAL ERROR] You said you need to call a tool, but you DID NOT actually call it. You MUST call the tool NOW. Do not just think about it - EXECUTE the tool call immediately.`
+                    });
+
+                    remainingRetries--;
+                    continue;
+                 }
+
                  if (audit.hasHallucination && remainingRetries > 0) {
                     console.warn(`[GameMaster] ⚠️ 检测到幻觉: ${audit.reason}。启动自我修正...`);
-                    
+
                     // Specific message for battle vs general
                     const fixMsg = isBattle
                       ? "正在核实战斗数据..."
@@ -355,38 +444,45 @@ export async function processGameMessage(
                     await send({ type: "thinking", data: { message: fixMsg } });
 
                     messages.push({ role: "assistant", content: passText });
-                    messages.push({ 
-                        role: "user", 
-                        content: `[SYSTEM ERROR] ATTENTION: You generated narrative describing a state change, but you DID NOT call the necessary tool. \nReason: ${audit.reason}\n\nREQUIRED ACTION: Immediately call the missing tool now. Do not repeat the narrative, just execute the tool.` 
+                    messages.push({
+                        role: "user",
+                        content: `[SYSTEM ERROR] ATTENTION: You generated narrative describing a state change, but you DID NOT call the necessary tool. \nReason: ${audit.reason}\n\nREQUIRED ACTION: Immediately call the missing tool now. Do not repeat the narrative, just execute the tool.`
                     });
 
                     remainingRetries--;
-                    continue; 
+                    continue;
                  } else {
-                    break; 
+                    break;
                  }
               }
           } finally {
               clearInterval(heartbeat);
           }
 
-          // 6. 提取快捷按钮 & 清理正文
+          // 6. 清理与保存
           // [Optimization] 防止空白回复：如果 AI 执行了工具但没有生成任何文本，自动补充系统提示
           if (!fullText.trim() && collectedTools.size > 0) {
              const fallback = `*（动作已执行: ${Array.from(collectedTools).join(", ")}）*`;
              await send({ type: "text", data: { content: fallback } });
-             fullText += fallback;
+             fullText = fallback;
           }
 
-          const extracted = extractActions(fullText);
-          if (extracted) {
-            await send({ type: "actions", data: { actions: extracted.actions } });
-            fullText = extracted.cleanText;
-          }
-
-          // 7. 保存 AI 回复
+          // 7. 保存 AI 回复（独立重试，不影响 LLM 重试循环）
           if (fullText) {
-            await saveChatHistory(ctx.playerId, "assistant", fullText);
+            const DB_SAVE_RETRIES = 3;
+            for (let dbAttempt = 1; dbAttempt <= DB_SAVE_RETRIES; dbAttempt++) {
+              try {
+                await saveChatHistory(ctx.playerId, "assistant", fullText, debugMetadata);
+                break; // 保存成功
+              } catch (dbErr) {
+                console.error(`[GameMaster] 保存AI回复失败 (第${dbAttempt}/${DB_SAVE_RETRIES}次):`, dbErr);
+                if (dbAttempt === DB_SAVE_RETRIES) {
+                  console.error("[GameMaster] 保存AI回复最终失败，跳过保存（不影响前端显示）");
+                } else {
+                  await new Promise(r => setTimeout(r, 1000 * dbAttempt)); // 递增延迟重试
+                }
+              }
+            }
           }
 
           // 8. 结束

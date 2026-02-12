@@ -80,6 +80,18 @@ export const modifyToolDefinitions: NormalizedTool[] = [
     },
   },
   // send_narrative: removed (LLM outputs narrative text directly)
+  {
+    name: "abandon_quest",
+    description: "GM指令：强制放弃任务。仅在GM模式或玩家明确要求强制放弃时使用。放弃后可重新在NPC处接取。",
+    parameters: {
+      type: "object",
+      properties: {
+        questId: { type: "string", description: "任务ID 或 任务名称" },
+        reason: { type: "string", description: "放弃原因" },
+      },
+      required: ["questId"],
+    },
+  },
 ];
 
 // ============================================================
@@ -234,6 +246,71 @@ export async function sendNarrative(args: Record<string, unknown>) {
     data: {
       text: args.text as string,
       type: (args.type as string) || "narrative",
+    },
+  };
+}
+
+export async function abandonQuest(
+  args: Record<string, unknown>,
+  playerId: string
+) {
+  const questId = args.questId as string;
+  const reason = args.reason as string | undefined;
+
+  if (!questId) return { success: false, error: "未指定任务" };
+
+  // 1. 查找任务（支持模糊匹配）
+  // 这里的 resolveQuest 需要从 generate-tools 导入，或者我们简单实现一个查找
+  // 由于 modify-tools.ts 没有导入 resolveQuest，我们这里先手动查找
+  // 为了复用逻辑，最好是从 resolve-id 导入，但当前文件头没有导入。
+  // 让我们查看文件头引用，如果有必要添加导入。
+  
+  // 简单查找逻辑：
+  const targetQuestId = questId;
+  const directMatch = await prisma.playerQuest.findFirst({
+    where: { 
+      playerId, 
+      questId: targetQuestId 
+    },
+    include: { quest: true }
+  });
+
+  let pq = directMatch;
+
+  if (!pq) {
+    // 尝试按名称查找
+    pq = await prisma.playerQuest.findFirst({
+      where: {
+        playerId,
+        quest: { name: { contains: questId } }
+      },
+      include: { quest: true }
+    });
+  }
+
+  if (!pq) {
+    return { success: false, error: "未找到该任务，或未接取" };
+  }
+
+  // 2. 删除任务记录
+  await prisma.playerQuest.delete({
+    where: { id: pq.id }
+  });
+
+  // 3. 记录日志
+  await logPlayerAction(
+    playerId,
+    "misc",
+    `放弃任务：${pq.quest.name} ${(reason ? "原因: " + reason : "")}`,
+    { questId: pq.questId, reason }
+  );
+
+  return {
+    success: true,
+    data: {
+      action: "abandon_quest",
+      questName: pq.quest.name,
+      message: "任务已放弃，相关进度已清除。",
     },
   };
 }

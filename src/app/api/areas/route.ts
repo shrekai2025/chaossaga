@@ -70,6 +70,24 @@ export async function GET(req: Request) {
       }
     }
 
+    // 计算边缘节点（连接数最少的非 boss 节点，供扩展功能使用）
+    const dedupedCounts: Record<string, number> = {};
+    area.nodes.forEach((n) => (dedupedCounts[n.id] = 0));
+    for (const c of uniqueConnections) {
+      dedupedCounts[c.fromId] = (dedupedCounts[c.fromId] || 0) + 1;
+      dedupedCounts[c.toId] = (dedupedCounts[c.toId] || 0) + 1;
+    }
+    const edgeNodes = area.nodes
+      .filter((n) => n.type !== "boss")
+      .map((n) => ({
+        id: n.id,
+        name: n.name,
+        type: n.type,
+        connectionCount: dedupedCounts[n.id] || 0,
+      }))
+      .sort((a, b) => a.connectionCount - b.connectionCount)
+      .slice(0, 5);
+
     return NextResponse.json({
       success: true,
       data: {
@@ -81,6 +99,7 @@ export async function GET(req: Request) {
           from: nameMap[c.fromId] || c.fromId,
           to: nameMap[c.toId] || c.toId,
         })),
+        edgeNodes,
       },
     });
   }

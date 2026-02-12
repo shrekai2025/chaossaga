@@ -84,6 +84,7 @@ model Area {
 
   nodes       AreaNode[]
   playerAreas PlayerArea[]
+  quests      Quest[]
 }
 
 model AreaNode {
@@ -178,11 +179,15 @@ model Quest {
   description      String  @db.Text
   type             String
   npcId            String?
+  areaId           String?
   objectives       Json
   rewards          Json
   specialCondition String? @db.Text
 
+  area         Area?         @relation(fields: [areaId], references: [id])
   playerQuests PlayerQuest[]
+
+  @@index([areaId])
 }
 
 model PlayerQuest {

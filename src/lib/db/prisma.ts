@@ -17,6 +17,12 @@ const globalForPrisma = globalThis as unknown as {
 function createPrismaClient() {
   const pool = new pg.Pool({
     connectionString: process.env.DATABASE_URL,
+    max: 10, // 限制连接数
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
+    // 保活：防止云端 DB 在 LLM 长时间流式调用期间断开空闲连接
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10000,
   });
   const adapter = new PrismaPg(pool);
   return new (PrismaClient as any)({ adapter }) as InstanceType<typeof PrismaClient>;

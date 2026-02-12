@@ -143,7 +143,7 @@ export default function ChatWindow({
       </div>
 
       {/* 输入区域 */}
-      <div className="border-t border-border bg-surface px-3 py-2.5 sm:px-4">
+      <div className="border-t border-border bg-surface px-3 py-1.5 sm:px-4">
         <div className="flex gap-2">
           <input
             ref={inputRef}
@@ -153,12 +153,12 @@ export default function ChatWindow({
             onKeyDown={handleKeyDown}
             placeholder={isLoading ? "Game Master 正在思考..." : "输入你的行动..."}
             disabled={isLoading}
-            className="flex-1 rounded-xl border border-border bg-background px-4 py-2.5 text-sm text-foreground placeholder-muted/50 outline-none transition-colors focus:border-accent disabled:opacity-50"
+            className="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder-muted/50 outline-none transition-colors focus:border-accent disabled:opacity-50"
           />
           {isLoading ? (
             <button
               onClick={onAbort}
-              className="rounded-xl bg-danger/10 border border-danger/20 px-5 py-2.5 text-sm font-medium text-danger transition-colors hover:bg-danger/20"
+              className="rounded-lg bg-danger/10 border border-danger/20 px-4 py-2 text-sm font-medium text-danger transition-colors hover:bg-danger/20"
               title="停止生成"
             >
               <span className="flex items-center gap-1.5">
@@ -170,15 +170,12 @@ export default function ChatWindow({
             <button
               onClick={handleSend}
               disabled={!input.trim()}
-              className="rounded-xl bg-accent px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-accent-dim disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-dim disabled:cursor-not-allowed disabled:opacity-40"
             >
               发送
             </button>
           )}
         </div>
-        <p className="mt-1.5 text-center text-[10px] text-muted/40">
-          输入自然语言与 AI Game Master 互动 · /gm 进入GM模式
-        </p>
       </div>
     </div>
   );

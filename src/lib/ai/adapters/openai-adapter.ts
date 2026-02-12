@@ -119,6 +119,7 @@ interface TuziRequestBody {
   stream?: boolean;
   tools?: OpenAITool[];
   tool_choice?: string;
+  response_format?: { type: "json_object" | "text" };
 }
 
 // ============================================================
@@ -168,6 +169,7 @@ export class OpenAIAdapter implements LLMAdapter {
       temperature: request.temperature ?? config.temperature,
       max_tokens: request.maxTokens ?? config.maxTokens,
       stream: false,
+      response_format: { type: "json_object" }, // 强制 JSON 输出
     };
 
     // 只在有工具时才添加 tools 和 tool_choice
@@ -180,6 +182,10 @@ export class OpenAIAdapter implements LLMAdapter {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 180_000); // 180秒
 
+    const bodyStr = JSON.stringify(body);
+    const startTime = Date.now();
+    console.log(`[Tuzi API] chat 请求: model=${request.model}, url=${url}, bodySize=${bodyStr.length} bytes, msgCount=${body.messages.length}`);
+
     try {
       const res = await fetch(url, {
         method: "POST",
@@ -189,9 +195,12 @@ export class OpenAIAdapter implements LLMAdapter {
           Authorization: `Bearer ${config.apiKey}`,
           ...(config.extraHeaders || {}),
         },
-        body: JSON.stringify(body),
+        body: bodyStr,
         signal: controller.signal,
       });
+
+      const elapsed = Date.now() - startTime;
+      console.log(`[Tuzi API] chat 响应: status=${res.status}, elapsed=${elapsed}ms`);
 
       if (!res.ok) {
         const errorText = await res.text();
@@ -204,6 +213,16 @@ export class OpenAIAdapter implements LLMAdapter {
       const data: TuziResponse = await res.json();
       const choice = data.choices[0];
       const toolCalls = extractToolCalls(choice);
+
+      const totalElapsed = Date.now() - startTime;
+      console.log(
+        `[Tuzi API] chat 完成: model=${request.model}, ` +
+        `inputTokens=${data.usage?.prompt_tokens ?? "?"}, ` +
+        `outputTokens=${data.usage?.completion_tokens ?? "?"}, ` +
+        `finishReason=${choice?.finish_reason ?? "?"}, ` +
+        `contentLen=${(choice?.message?.content ?? "").length}, ` +
+        `totalTime=${totalElapsed}ms`
+      );
 
       return {
         content: choice?.message?.content ?? "",
@@ -240,6 +259,7 @@ export class OpenAIAdapter implements LLMAdapter {
       temperature: request.temperature ?? config.temperature,
       max_tokens: request.maxTokens ?? config.maxTokens,
       stream: true,
+      response_format: { type: "json_object" }, // 强制 JSON 输出
     };
 
     if (request.tools && request.tools.length > 0) {
