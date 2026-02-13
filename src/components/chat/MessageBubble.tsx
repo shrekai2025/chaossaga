@@ -211,17 +211,29 @@ function CopyButton({
   );
 }
 
-/** 查看原始内容按钮 */
+/** 查看原始内容按钮 —— 优先显示 toolCalls JSON，否则显示纯文本 */
 function ViewRawButton({
   content,
+  toolCalls,
   isStreaming,
 }: {
   content: string;
+  toolCalls?: Array<{ tool: string; success?: boolean; data?: unknown }>;
   isStreaming?: boolean;
 }) {
   const [showRaw, setShowRaw] = useState(false);
 
   if (isStreaming || !content) return null;
+
+  // 优先显示工具调用的原始 JSON 数据
+  const hasToolData = toolCalls && toolCalls.length > 0 && toolCalls.some(tc => tc.data);
+  const rawDisplay = hasToolData
+    ? JSON.stringify(
+        toolCalls!.map(tc => ({ tool: tc.tool, success: tc.success, data: tc.data })),
+        null,
+        2
+      )
+    : content;
 
   return (
     <>
@@ -257,7 +269,9 @@ function ViewRawButton({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex justify-between items-center mb-3">
-              <h3 className="font-medium text-sm text-foreground">原始回复内容</h3>
+              <h3 className="font-medium text-sm text-foreground">
+                {hasToolData ? "原始 JSON 数据" : "原始回复内容"}
+              </h3>
               <button
                 onClick={() => setShowRaw(false)}
                 className="text-muted hover:text-foreground"
@@ -266,7 +280,7 @@ function ViewRawButton({
               </button>
             </div>
             <pre className="whitespace-pre-wrap text-xs text-muted bg-muted/5 p-3 rounded border border-border-light overflow-x-auto">
-              {content}
+              {rawDisplay}
             </pre>
           </div>
         </div>
@@ -545,7 +559,7 @@ export default function MessageBubble({
       </div>
       <div className="shrink-0 pt-2 flex items-center gap-0.5">
         <CopyButton content={message.content} isStreaming={message.isStreaming} />
-        <ViewRawButton content={message.content} isStreaming={message.isStreaming} />
+        <ViewRawButton content={message.content} toolCalls={message.toolCalls} isStreaming={message.isStreaming} />
         {onDelete && (
           <DeleteButton
             onDelete={() => onDelete(message.id)}

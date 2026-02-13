@@ -79,6 +79,27 @@ export const modifyToolDefinitions: NormalizedTool[] = [
       required: ["items"],
     },
   },
+  {
+    name: "modify_enemy_hp",
+    description:
+      "GM指令：修改当前战斗中敌人的当前HP。可按敌人索引或名称定位，支持 set/add/subtract 操作",
+    parameters: {
+      type: "object",
+      properties: {
+        battleId: { type: "string", description: "战斗ID（可选，省略时自动使用玩家当前活跃战斗）" },
+        enemyIndex: { type: "number", description: "目标敌人的索引（从0开始）" },
+        enemyName: { type: "string", description: "目标敌人的名称（支持包含匹配）" },
+        value: { type: "number", description: "HP数值（结合 operation 使用）" },
+        operation: {
+          type: "string",
+          enum: ["set", "add", "subtract"],
+          description: "操作类型，默认 set",
+        },
+        reason: { type: "string", description: "修改原因（用于日志）" },
+      },
+      required: ["value"],
+    },
+  },
   // send_narrative: removed (LLM outputs narrative text directly)
   {
     name: "abandon_quest",
@@ -236,6 +257,124 @@ export async function addItem(
   return {
     success: true,
     data: { addedItems: added },
+  };
+}
+
+interface BattleEnemySnapshot {
+  name: string;
+  hp: number;
+  maxHp: number;
+}
+
+export async function modifyEnemyHp(
+  args: Record<string, unknown>,
+  playerId: string
+) {
+  const battleId = args.battleId as string | undefined;
+  const enemyIndex = args.enemyIndex as number | undefined;
+  const enemyName = args.enemyName as string | undefined;
+  const operation = (args.operation as string | undefined) || "set";
+  const reason = (args.reason as string | undefined) || "GM调整敌人血量";
+  const rawValue = args.value;
+  const value =
+    typeof rawValue === "number" ? rawValue : Number.parseFloat(String(rawValue ?? ""));
+
+  if (!Number.isFinite(value)) {
+    return { success: false, error: "缺少或无效的 value 参数" };
+  }
+
+  const battle = battleId
+    ? await prisma.battleState.findUnique({ where: { id: battleId } })
+    : await prisma.battleState.findFirst({
+        where: { playerId, status: "active" },
+      });
+
+  if (!battle || battle.playerId !== playerId) {
+    return { success: false, error: "未找到该玩家的战斗记录" };
+  }
+  if (battle.status !== "active") {
+    return { success: false, error: `战斗已结束: ${battle.status}` };
+  }
+
+  const enemies = (battle.enemies as unknown as BattleEnemySnapshot[]) ?? [];
+  if (!Array.isArray(enemies) || enemies.length === 0) {
+    return { success: false, error: "战斗中没有可修改的敌人" };
+  }
+
+  let targetIndex = -1;
+  if (typeof enemyIndex === "number" && Number.isInteger(enemyIndex)) {
+    if (enemyIndex < 0 || enemyIndex >= enemies.length) {
+      return { success: false, error: `enemyIndex 越界，当前敌人数: ${enemies.length}` };
+    }
+    targetIndex = enemyIndex;
+  } else if (enemyName && enemyName.trim()) {
+    const needle = enemyName.trim().toLowerCase();
+    targetIndex = enemies.findIndex((e) => e.name.toLowerCase().includes(needle));
+    if (targetIndex < 0) {
+      return { success: false, error: `未找到名称匹配「${enemyName}」的敌人` };
+    }
+  } else {
+    targetIndex = enemies.findIndex((e) => e.hp > 0);
+    if (targetIndex < 0) targetIndex = 0;
+  }
+
+  const target = enemies[targetIndex];
+  const currentHp = typeof target.hp === "number" ? target.hp : 0;
+  const maxHp =
+    typeof target.maxHp === "number" && target.maxHp > 0 ? target.maxHp : Math.max(1, currentHp);
+
+  let nextHp: number;
+  switch (operation) {
+    case "add":
+      nextHp = currentHp + value;
+      break;
+    case "subtract":
+      nextHp = currentHp - value;
+      break;
+    default:
+      nextHp = value;
+  }
+  const clampedHp = Math.max(0, Math.min(maxHp, Math.floor(nextHp)));
+  target.hp = clampedHp;
+  enemies[targetIndex] = target;
+
+  await prisma.battleState.update({
+    where: { id: battle.id },
+    data: {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      enemies: enemies as any,
+    },
+  });
+
+  await logPlayerAction(
+    playerId,
+    "battle",
+    `GM修改敌人血量：${target.name} HP ${currentHp} -> ${clampedHp} (${operation} ${value})`,
+    {
+      battleId: battle.id,
+      enemyIndex: targetIndex,
+      enemyName: target.name,
+      fromHp: currentHp,
+      toHp: clampedHp,
+      operation,
+      value,
+      reason,
+    }
+  );
+
+  return {
+    success: true,
+    data: {
+      battleId: battle.id,
+      enemyIndex: targetIndex,
+      enemyName: target.name,
+      fromHp: currentHp,
+      toHp: clampedHp,
+      maxHp,
+      operation,
+      value,
+      reason,
+    },
   };
 }
 

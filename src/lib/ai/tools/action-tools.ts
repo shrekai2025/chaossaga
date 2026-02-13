@@ -12,11 +12,21 @@ import {
   type TurnResult,
 } from "@/lib/game/battle-engine";
 import type { EnemyState } from "@/lib/game/enemy-ai";
-import { checkLevelUp, calcBaseStats, type Realm } from "@/lib/game/formulas";
+import { decideEnemyAction, markSkillUsed, tickEnemyCooldowns } from "@/lib/game/enemy-ai";
+import { checkLevelUp, calcBaseStats, getElementMultiplier, type Realm } from "@/lib/game/formulas";
 import { calcFinalStats } from "@/lib/game/player-calc";
 import type { DropTemplate } from "@/lib/game/drop-system";
 import { resolveItem, resolveSkill, resolveNpc } from "./resolve-id";
 import { logPlayerAction } from "@/lib/game/logger";
+import {
+  validateItemGift,
+  validateDamageProposal,
+  validateQuestReward,
+  validateActiveQuestCount,
+  needsSupervisorCheck,
+  supervisorCheck,
+  type ItemProposal,
+} from "../guardrail";
 
 // ============================================================
 // 工具定义
@@ -69,7 +79,7 @@ export const actionToolDefinitions: NormalizedTool[] = [
               enum: ["attack", "skill", "defend", "item", "flee"],
             },
             skillId: { type: "string", description: "技能ID（type=skill时）" },
-            itemId: { type: "string", description: "物品ID（type=item时）" },
+            itemId: { type: "string", description: "物品ID或名称（type=item时）" },
             targetIndex: { type: "number", description: "目标敌人索引，默认0" },
           },
           required: ["type"],
@@ -112,6 +122,117 @@ export const actionToolDefinitions: NormalizedTool[] = [
     },
   },
   // enhance_equipment: removed (unimplemented stub)
+  {
+    name: "improvise_action",
+    description:
+      "战斗创意行动：玩家提出非标准战斗行为时调用（如用火把烧敌人、把石头推向它）。" +
+      "AI 估算效果，Guardrail 自动校验并 cap 数值。敌人仍会反击。",
+    parameters: {
+      type: "object",
+      properties: {
+        battleId: { type: "string", description: "战斗ID（可省略，自动查找活跃战斗）" },
+        itemId: { type: "string", description: "消耗的背包物品ID或名称（可选）" },
+        description: { type: "string", description: "创意行动描述，如'用火把点燃古树'" },
+        targetIndex: { type: "number", description: "目标敌人索引，默认0" },
+        proposedEffect: {
+          type: "object",
+          description: "AI 提议的效果",
+          properties: {
+            type: {
+              type: "string",
+              enum: ["damage", "heal", "debuff", "utility"],
+              description: "效果类型",
+            },
+            element: {
+              type: "string",
+              enum: ["water", "fire", "earth", "wind", "dark", "light", "none"],
+              description: "元素属性",
+            },
+            value: { type: "number", description: "提议数值（伤害/治疗量）" },
+            duration: { type: "number", description: "debuff 持续回合数" },
+          },
+          required: ["type"],
+        },
+      },
+      required: ["description", "proposedEffect"],
+    },
+  },
+  {
+    name: "resolve_battle_diplomacy",
+    description:
+      "战斗外交：非战斗方式解决战斗。当敌人HP低（<25%）且为智能生物，或玩家主动表达和平意图时调用。" +
+      "敌人可以：投降赠物、逃跑、谈判、被驯服，可触发隐藏任务。",
+    parameters: {
+      type: "object",
+      properties: {
+        battleId: { type: "string", description: "战斗ID（可省略，自动查找活跃战斗）" },
+        resolution: {
+          type: "string",
+          enum: ["enemy_surrenders", "enemy_flees", "negotiate", "player_tames"],
+          description: "外交结果类型",
+        },
+        outcome: {
+          type: "object",
+          description: "外交结果详情",
+          properties: {
+            giftItems: {
+              type: "array",
+              description: "敌人赠送的物品",
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string" },
+                  type: {
+                    type: "string",
+                    enum: ["weapon", "armor", "accessory", "consumable", "material", "quest_item", "collectible"],
+                  },
+                  quality: { type: "string", enum: ["common", "uncommon", "rare", "epic"] },
+                  statsJson: { type: "string", description: "物品属性JSON字符串，如 {\"attack\":5}" },
+                  specialEffect: { type: "string" },
+                },
+                required: ["name", "type"],
+              },
+            },
+            giftGold: { type: "number", description: "赠送金币" },
+            newQuest: {
+              type: "object",
+              description: "触发的新任务",
+              properties: {
+                name: { type: "string" },
+                description: { type: "string" },
+                type: { type: "string", enum: ["fetch", "kill", "riddle", "escort", "explore"] },
+                objectives: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      description: { type: "string" },
+                      type: { type: "string" },
+                      target: { type: "string" },
+                      required: { type: "number" },
+                    },
+                    required: ["description"],
+                  },
+                },
+                rewards: {
+                  type: "object",
+                  properties: {
+                    exp: { type: "number" },
+                    gold: { type: "number" },
+                    itemsJson: { type: "string", description: "奖励物品JSON数组字符串" },
+                  },
+                },
+              },
+              required: ["name", "description"],
+            },
+            information: { type: "string", description: "敌人提供的线索或信息" },
+            expReward: { type: "number", description: "外交解决获得的经验（通常低于战斗击杀）" },
+          },
+        },
+      },
+      required: ["resolution", "outcome"],
+    },
+  },
 ];
 
 // ============================================================
@@ -161,8 +282,61 @@ export async function startBattle(
   let enemies: BattleEnemy[];
 
   if (enemyInput && enemyInput.length > 0) {
-    // AI 明确指定了敌人
-    enemies = enemyInput.map((e) => buildEnemyStats(e));
+    // AI 明确指定了敌人，但需要从当前节点合并丰富数据（drops, skills, phases 等）
+    // 否则 LLM 只传 name/level 会导致 boss 没有掉落和技能
+    let nodeRichData: {
+      boss?: Record<string, unknown>;
+      enemyTemplates?: Array<Record<string, unknown>>;
+    } | null = null;
+
+    if (player.currentNodeId) {
+      const node = await prisma.areaNode.findUnique({
+        where: { id: player.currentNodeId },
+        select: { data: true, type: true },
+      });
+      if (node?.data) {
+        const nd = node.data as Record<string, unknown>;
+        nodeRichData = {
+          boss: node.type === "boss" && nd.boss ? (nd.boss as Record<string, unknown>) : undefined,
+          enemyTemplates: nd.enemyTemplates ? (nd.enemyTemplates as Array<Record<string, unknown>>) : undefined,
+        };
+      }
+    }
+
+    // 关键修复：如果当前就是 boss 节点，强制使用节点中的 boss 完整配置。
+    // 这样即使 LLM 只传了 {name, level}，也不会丢失 drops/skills/phases。
+    if (nodeRichData?.boss) {
+      enemies = [
+        buildEnemyStats(nodeRichData.boss as Parameters<typeof buildEnemyStats>[0]),
+      ];
+    } else {
+      enemies = enemyInput.map((e) => {
+      // 尝试从节点数据中找到同名敌人，合并 drops/skills/phases 等丰富字段
+      let merged: Record<string, unknown> = { ...e };
+
+      if (nodeRichData?.boss) {
+        const bossName = nodeRichData.boss.name as string | undefined;
+        if ((bossName && e.name.includes(bossName)) || bossName?.includes(e.name)) {
+          // 合并 boss 数据（节点数据为底，LLM 输入覆盖 name/level/element）
+          merged = { ...nodeRichData.boss, ...e };
+        }
+      }
+
+      if (!merged.drops && !merged.skills && nodeRichData?.enemyTemplates) {
+        const tpl = nodeRichData.enemyTemplates.find(
+          (t) => {
+            const tName = t.name as string;
+            return tName === e.name || tName.includes(e.name) || e.name.includes(tName);
+          }
+        );
+        if (tpl) {
+          merged = { ...tpl, ...e };
+        }
+      }
+
+      return buildEnemyStats(merged as Parameters<typeof buildEnemyStats>[0]);
+      });
+    }
   } else {
     // 未指定敌人 → 从当前节点的 enemyTemplates 随机抽取
     enemies = await (async () => {
@@ -331,6 +505,22 @@ export async function executeBattleAction(
   });
   if (!player) return { success: false, error: "玩家不存在" };
 
+  // playerBuffs 复用为战斗内玩家临时状态容器（当前仅存技能冷却）
+  const playerBuffsState = (() => {
+    const raw = battle.playerBuffs as unknown;
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      return raw as Record<string, unknown>;
+    }
+    return {} as Record<string, unknown>;
+  })();
+  const skillCooldowns = (() => {
+    const raw = playerBuffsState.skillCooldowns;
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      return raw as Record<string, number>;
+    }
+    return {} as Record<string, number>;
+  })();
+
   // ---- 构建战斗引擎输入（保留完整字段，保证跨回合不丢失） ----
   const dbEnemies = battle.enemies as unknown as BattleEnemy[];
   const enemyStates: EnemyState[] = dbEnemies.map((e) => ({
@@ -374,6 +564,8 @@ export async function executeBattleAction(
     element: s.element,
     mpCost: s.mpCost,
     cooldown: s.cooldown,
+    currentCooldown:
+      typeof skillCooldowns[s.id] === "number" ? skillCooldowns[s.id] : 0,
     effect: s.effect as Record<string, unknown> | undefined,
   }));
 
@@ -401,13 +593,39 @@ export async function executeBattleAction(
     skills: playerSkills,
   };
 
+  // 技能冷却前置校验：CD未结束时直接阻止施法，不消耗本回合
+  if (action.type === "skill" && action.skillId) {
+    const targetSkill = playerState.skills.find((s) => s.id === action.skillId);
+    if (!targetSkill) {
+      return { success: false, error: "技能不存在或未装备" };
+    }
+    if ((targetSkill.currentCooldown ?? 0) > 0) {
+      return {
+        success: false,
+        error: `技能「${targetSkill.name}」冷却中，剩余 ${targetSkill.currentCooldown} 回合`,
+      };
+    }
+  }
+
   // ---- 处理物品使用（需要 DB 操作） ----
   let battleItem: BattleItem | undefined;
-  if (action.type === "item" && action.itemId) {
-    const item = player.inventory.find(
-      (i) => i.id === action.itemId && i.type === "consumable"
-    );
-    if (!item) return { success: false, error: "物品不存在或非消耗品" };
+  if (action.type === "item") {
+    if (!action.itemId) {
+      return { success: false, error: "缺少 itemId 参数" };
+    }
+
+    // 统一使用解析器，支持 ID / 精确名称 / 模糊名称
+    const resolved = await resolveItem(action.itemId, playerId);
+    if (!resolved.found) {
+      return { success: false, error: resolved.error };
+    }
+    const item = resolved.record;
+    if (item.type !== "consumable") {
+      return { success: false, error: "物品不存在或非消耗品" };
+    }
+
+    // 归一化为真实ID，便于后续日志与链路一致
+    action.itemId = item.id;
 
     const stats = item.stats as Record<string, number> | null;
     battleItem = {
@@ -463,6 +681,15 @@ export async function executeBattleAction(
     data: {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       enemies: updatedEnemies as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      playerBuffs: {
+        ...playerBuffsState,
+        skillCooldowns: Object.fromEntries(
+          playerState.skills
+            .map((s) => [s.id, s.currentCooldown ?? 0] as const)
+            .filter(([, cd]) => cd > 0)
+        ),
+      } as any,
       roundNumber: battle.roundNumber + 1,
       status: turnResult.battleStatus,
     },
@@ -524,23 +751,73 @@ export async function executeBattleAction(
       );
     }
 
-    // 掉落物品写入背包（区分技能和普通物品）
+    // 预读取已装备技能槽位，便于新技能掉落时自动装备（最多4个）
+    const equippedSkills = await prisma.playerSkill.findMany({
+      where: { playerId, equipped: true },
+      select: { slotIndex: true },
+    });
+    const usedSkillSlots = new Set(
+      equippedSkills
+        .map((s) => s.slotIndex)
+        .filter((idx): idx is number => typeof idx === "number")
+    );
+    const MAX_SKILL_SLOTS = 4;
+    const getNextSkillSlot = (): number | null => {
+      for (let i = 0; i < MAX_SKILL_SLOTS; i++) {
+        if (!usedSkillSlots.has(i)) return i;
+      }
+      return null;
+    };
+
+    // 掉落处理（技能掉落只进技能表，不进背包）
     for (const drop of turnResult.rewards.items) {
-      if (drop.type === "skill" && drop.skillData) {
-        // 技能掉落 → 添加到玩家技能表
+      if (drop.type === "skill") {
+        const rawStats = (drop.stats ?? {}) as Record<string, number>;
+        const normalizedSkillData = drop.skillData ?? {
+          element: "none",
+          damage: rawStats.damage ?? 10,
+          mpCost: rawStats.mpCost ?? 0,
+          cooldown: rawStats.cooldown ?? 0,
+          effect: undefined,
+        };
+
+        // 去重：同名技能不重复创建；若已有但未装备，尝试自动补装备到空槽
+        const existingSkill = await prisma.playerSkill.findFirst({
+          where: { playerId, name: drop.name },
+          select: { id: true, equipped: true },
+        });
+
+        if (existingSkill) {
+          if (!existingSkill.equipped) {
+            const slot = getNextSkillSlot();
+            if (slot !== null) {
+              await prisma.playerSkill.update({
+                where: { id: existingSkill.id },
+                data: { equipped: true, slotIndex: slot },
+              });
+              usedSkillSlots.add(slot);
+            }
+          }
+          continue;
+        }
+
+        const slot = getNextSkillSlot();
+        const autoEquip = slot !== null;
         await prisma.playerSkill.create({
           data: {
             playerId,
             name: drop.name,
-            element: drop.skillData.element,
-            damage: drop.skillData.damage,
-            mpCost: drop.skillData.mpCost,
-            cooldown: drop.skillData.cooldown,
+            element: normalizedSkillData.element,
+            damage: normalizedSkillData.damage,
+            mpCost: normalizedSkillData.mpCost,
+            cooldown: normalizedSkillData.cooldown,
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            effect: drop.skillData.effect ? (drop.skillData.effect as any) : undefined,
-            equipped: false,
+            effect: normalizedSkillData.effect ? (normalizedSkillData.effect as any) : undefined,
+            equipped: autoEquip,
+            slotIndex: autoEquip ? slot : null,
           },
         });
+        if (slot !== null) usedSkillSlots.add(slot);
       } else {
         // 普通物品 → 添加到背包
         await prisma.inventoryItem.create({
@@ -1410,5 +1687,585 @@ export async function enhanceEquipment(
   return {
     success: true,
     data: { message: `装备 ${item.name} 强化功能开发中` },
+  };
+}
+
+// ============================================================
+// 创意行动：improvise_action
+// ============================================================
+
+export async function improviseAction(
+  args: Record<string, unknown>,
+  playerId: string
+) {
+  let battleId = args.battleId as string | undefined;
+  const itemId = args.itemId as string | undefined;
+  const description = args.description as string | undefined;
+  const targetIndex = (args.targetIndex as number) ?? 0;
+  const proposedEffect = args.proposedEffect as {
+    type: "damage" | "heal" | "debuff" | "utility";
+    element?: string;
+    value?: number;
+    duration?: number;
+  } | undefined;
+
+  if (!description) return { success: false, error: "缺少 description 参数（行动描述）" };
+  if (!proposedEffect) return { success: false, error: "缺少 proposedEffect 参数（效果提议）" };
+
+  // 自动查找活跃战斗
+  if (!battleId) {
+    const activeBattle = await prisma.battleState.findFirst({
+      where: { playerId, status: "active" },
+      select: { id: true },
+    });
+    if (activeBattle) battleId = activeBattle.id;
+  }
+  if (!battleId) return { success: false, error: "当前无活跃战斗" };
+
+  // 加载战斗和玩家数据
+  const battle = await prisma.battleState.findUnique({ where: { id: battleId } });
+  if (!battle || battle.playerId !== playerId) return { success: false, error: "战斗不存在" };
+  if (battle.status !== "active") return { success: false, error: `战斗已结束: ${battle.status}` };
+
+  const player = await prisma.player.findUnique({
+    where: { id: playerId },
+    include: { inventory: true },
+  });
+  if (!player) return { success: false, error: "玩家不存在" };
+
+  const enemies = battle.enemies as unknown as BattleEnemy[];
+  if (targetIndex < 0 || targetIndex >= enemies.length) {
+    return { success: false, error: `目标索引 ${targetIndex} 越界，敌人数量 ${enemies.length}` };
+  }
+
+  const targetEnemy = enemies[targetIndex];
+  if (targetEnemy.hp <= 0) {
+    return { success: false, error: `目标「${targetEnemy.name}」已倒下` };
+  }
+
+  // 消耗物品（如有）
+  let hasItem = false;
+  let consumedItemName = "";
+  if (itemId) {
+    const resolved = await resolveItem(itemId, playerId);
+    if (!resolved.found) return { success: false, error: resolved.error };
+    const item = resolved.record;
+    hasItem = true;
+    consumedItemName = item.name;
+
+    // 消耗物品
+    if (item.quantity <= 1) {
+      await prisma.inventoryItem.delete({ where: { id: item.id } });
+    } else {
+      await prisma.inventoryItem.update({
+        where: { id: item.id },
+        data: { quantity: { decrement: 1 } },
+      });
+    }
+  }
+
+  // 计算装备加成后的最终属性
+  const equippedItems = player.inventory
+    .filter((i) => i.equipped)
+    .map((i) => ({ stats: i.stats as Record<string, unknown> | null }));
+  const finalStats = calcFinalStats(player.level, player.realm as Realm, equippedItems);
+
+  // 根据效果类型处理
+  let actualDamage = 0;
+  let actualHeal = 0;
+  let elementRelation: "advantage" | "disadvantage" | "neutral" = "neutral";
+  let guardrailNote = "";
+
+  if (proposedEffect.type === "damage") {
+    const proposedValue = proposedEffect.value ?? Math.floor(finalStats.attack * (hasItem ? 1.0 : 0.2));
+
+    // Guardrail 校验伤害
+    const validation = validateDamageProposal({
+      value: proposedValue,
+      playerAttack: finalStats.attack,
+      hasItem,
+      attackElement: proposedEffect.element,
+      defendElement: targetEnemy.element,
+    });
+
+    actualDamage = validation.cappedValue ?? proposedValue;
+    if (validation.reason) guardrailNote = validation.reason;
+
+    // 元素关系
+    if (validation.elementBonus && validation.elementBonus > 1) elementRelation = "advantage";
+    else if (validation.elementBonus && validation.elementBonus < 1) elementRelation = "disadvantage";
+
+    // 扣减敌人 HP
+    targetEnemy.hp = Math.max(0, targetEnemy.hp - actualDamage);
+  } else if (proposedEffect.type === "heal") {
+    // 创意治疗（如用环境草药）
+    const proposedHeal = proposedEffect.value ?? Math.floor(finalStats.attack * 0.3);
+    actualHeal = Math.min(proposedHeal, player.maxHp - player.hp);
+    await prisma.player.update({
+      where: { id: playerId },
+      data: { hp: { increment: actualHeal } },
+    });
+  }
+  // debuff / utility 仅叙事，不改数值
+
+  // 检查战斗是否结束
+  const allDead = enemies.every((e) => e.hp <= 0);
+  let battleStatus: string = "active";
+
+  if (allDead) {
+    battleStatus = "won";
+  } else {
+    // 敌人反击（复用 enemy-ai 逻辑）
+    // 简化处理：选择一个存活敌人进行反击
+    const aliveEnemies = enemies.filter((e) => e.hp > 0);
+    for (const enemy of aliveEnemies) {
+      const enemyState: EnemyState = {
+        name: enemy.name,
+        level: enemy.level,
+        element: enemy.element,
+        hp: enemy.hp,
+        maxHp: enemy.maxHp,
+        attack: enemy.attack,
+        defense: enemy.defense,
+        speed: enemy.speed,
+        skills: (enemy.skills ?? []).map((s) => ({
+          name: s.name,
+          damage: s.damage ?? 0,
+          element: s.element,
+          type: s.type,
+          multiplier: s.multiplier,
+          cooldown: s.cooldown,
+          currentCooldown: s.currentCooldown,
+          healAmount: s.healAmount,
+        })),
+        phases: enemy.phases,
+        triggeredPhases: enemy.triggeredPhases,
+      };
+
+      const action = decideEnemyAction(enemyState, battle.roundNumber);
+
+      // 同步 triggeredPhases 回 enemies 数组
+      enemy.triggeredPhases = enemyState.triggeredPhases;
+
+      if (action.type === "attack" || action.type === "skill") {
+        const skillDmg = action.skill?.damage ?? 0;
+        const totalAtk = enemy.attack + skillDmg;
+        const baseDamage = Math.max(1, totalAtk - finalStats.defense * 0.5);
+        const elemMult = action.skill?.element
+          ? getElementMultiplier(action.skill.element, "none")
+          : 1.0;
+        const enemyDamage = Math.floor(baseDamage * elemMult);
+
+        await prisma.player.update({
+          where: { id: playerId },
+          data: { hp: { decrement: Math.min(enemyDamage, player.hp) } },
+        });
+
+        if (action.skill) markSkillUsed(action.skill);
+      } else if (action.type === "heal" && action.skill?.healAmount) {
+        enemy.hp = Math.min(enemy.maxHp, enemy.hp + action.skill.healAmount);
+        if (action.skill) markSkillUsed(action.skill);
+      }
+
+      // 冷却
+      tickEnemyCooldowns(enemyState);
+      enemy.skills = enemyState.skills;
+    }
+  }
+
+  // 更新战斗状态到 DB
+  await prisma.battleState.update({
+    where: { id: battleId },
+    data: {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      enemies: enemies as any,
+      roundNumber: battle.roundNumber + 1,
+      status: battleStatus,
+    },
+  });
+
+  // 胜利处理
+  let rewards = null;
+  if (battleStatus === "won") {
+    // 简化奖励计算（复用 formulas 的经验/金币公式）
+    const { calcBattleExp, calcGoldDrop } = await import("@/lib/game/formulas");
+    const enemyLevels = enemies.map((e) => e.level);
+    const exp = calcBattleExp(player.level, enemyLevels);
+    const gold = calcGoldDrop(enemyLevels);
+
+    await prisma.player.update({
+      where: { id: playerId },
+      data: { exp: { increment: exp }, gold: { increment: gold } },
+    });
+
+    const updatedPlayer = await prisma.player.findUnique({ where: { id: playerId } });
+    if (updatedPlayer) {
+      const levelCheck = checkLevelUp(updatedPlayer.level, updatedPlayer.exp);
+      if (levelCheck.levelsGained > 0) {
+        const newStats = calcBaseStats(levelCheck.newLevel, updatedPlayer.realm as Realm);
+        await prisma.player.update({
+          where: { id: playerId },
+          data: {
+            level: levelCheck.newLevel,
+            exp: levelCheck.remainingExp,
+            maxHp: newStats.maxHp, maxMp: newStats.maxMp,
+            attack: newStats.attack, defense: newStats.defense, speed: newStats.speed,
+            hp: newStats.maxHp, mp: newStats.maxMp,
+          },
+        });
+      }
+    }
+
+    rewards = { exp, gold };
+    await prisma.battleState.delete({ where: { id: battleId } });
+  }
+
+  // 读取最新玩家状态
+  const latestPlayer = await prisma.player.findUnique({
+    where: { id: playerId },
+    select: { hp: true, mp: true, maxHp: true, maxMp: true, exp: true, gold: true, level: true, attack: true, defense: true, speed: true },
+  });
+
+  await logPlayerAction(
+    playerId,
+    "battle",
+    `创意行动：${description}${consumedItemName ? `（消耗 ${consumedItemName}）` : ""}，造成 ${actualDamage} 点伤害`,
+    { battleId, description, actualDamage, hasItem, consumedItemName }
+  );
+
+  return {
+    success: true,
+    data: {
+      round: battle.roundNumber,
+      description,
+      consumedItem: consumedItemName || null,
+      effectType: proposedEffect.type,
+      actualDamage: actualDamage || undefined,
+      actualHeal: actualHeal || undefined,
+      elementRelation,
+      targetName: targetEnemy.name,
+      targetHpAfter: targetEnemy.hp,
+      targetMaxHp: targetEnemy.maxHp,
+      battleStatus,
+      enemyStates: enemies.map((e) => ({
+        name: e.name,
+        hp: e.hp,
+        maxHp: e.maxHp,
+        element: e.element,
+      })),
+      rewards,
+      guardrailNote: guardrailNote || undefined,
+    },
+    stateUpdate: latestPlayer
+      ? {
+          hp: latestPlayer.hp,
+          mp: latestPlayer.mp,
+          maxHp: latestPlayer.maxHp,
+          maxMp: latestPlayer.maxMp,
+          exp: latestPlayer.exp,
+          gold: latestPlayer.gold,
+          level: latestPlayer.level,
+          attack: latestPlayer.attack,
+          defense: latestPlayer.defense,
+          speed: latestPlayer.speed,
+        }
+      : undefined,
+  };
+}
+
+// ============================================================
+// 战斗外交：resolve_battle_diplomacy
+// ============================================================
+
+export async function resolveBattleDiplomacy(
+  args: Record<string, unknown>,
+  playerId: string
+) {
+  let battleId = args.battleId as string | undefined;
+  const resolution = args.resolution as string | undefined;
+  const outcome = args.outcome as Record<string, unknown> | undefined;
+
+  if (!resolution) return { success: false, error: "缺少 resolution 参数" };
+  if (!outcome) return { success: false, error: "缺少 outcome 参数" };
+
+  // 自动查找活跃战斗
+  if (!battleId) {
+    const activeBattle = await prisma.battleState.findFirst({
+      where: { playerId, status: "active" },
+      select: { id: true },
+    });
+    if (activeBattle) battleId = activeBattle.id;
+  }
+  if (!battleId) return { success: false, error: "当前无活跃战斗" };
+
+  const battle = await prisma.battleState.findUnique({ where: { id: battleId } });
+  if (!battle || battle.playerId !== playerId) return { success: false, error: "战斗不存在" };
+  if (battle.status !== "active") return { success: false, error: `战斗已结束: ${battle.status}` };
+
+  const player = await prisma.player.findUnique({ where: { id: playerId } });
+  if (!player) return { success: false, error: "玩家不存在" };
+
+  const enemies = battle.enemies as unknown as BattleEnemy[];
+
+  // 判断来源等级（最高级敌人决定 source）
+  const maxEnemyLevel = Math.max(...enemies.map((e) => e.level));
+  const isBoss = enemies.some((e) => e.phases && e.phases.length > 0);
+  const source = isBoss ? "boss" : "enemy";
+
+  // ---- Guardrail 校验 ----
+
+  // 1. 赠送物品校验（将 statsJson 解析为 stats 对象）
+  const rawGiftItems = outcome.giftItems as Array<Record<string, unknown>> | undefined;
+  const giftItems: ItemProposal[] = (rawGiftItems || []).map((item) => {
+    const parsed: ItemProposal = {
+      name: item.name as string,
+      type: item.type as string,
+      quality: item.quality as string | undefined,
+      specialEffect: item.specialEffect as string | undefined,
+      stats: undefined,
+    };
+    // 解析 statsJson 字符串为 stats 对象
+    if (item.statsJson && typeof item.statsJson === "string") {
+      try { parsed.stats = JSON.parse(item.statsJson); } catch { /* ignore */ }
+    } else if (item.stats && typeof item.stats === "object") {
+      parsed.stats = item.stats as Record<string, number>;
+    }
+    return parsed;
+  });
+  const validatedItems: ItemProposal[] = [];
+  let hasRareItem = false;
+
+  if (giftItems.length > 0) {
+    for (const item of giftItems) {
+      const result = validateItemGift(item, player.level, source, player.realm as Realm);
+      if (!result.ok) {
+        return { success: false, error: `外交赠品「${item.name}」不合规：${result.reason}` };
+      }
+      validatedItems.push(item);
+      if (item.quality === "rare" || item.quality === "epic") hasRareItem = true;
+    }
+  }
+
+  // 2. 金币校验
+  const giftGold = outcome.giftGold as number | undefined;
+  if (giftGold !== undefined) {
+    const goldCap = player.level * 50;
+    if (giftGold > goldCap) {
+      return { success: false, error: `赠送金币 ${giftGold} 超过上限 ${goldCap}` };
+    }
+  }
+
+  // 3. 新任务校验（解析 itemsJson）
+  const rawNewQuest = outcome.newQuest as Record<string, unknown> | undefined;
+  let newQuest: {
+    name: string;
+    description: string;
+    type?: string;
+    objectives?: Array<Record<string, unknown>>;
+    rewards?: { exp?: number; gold?: number; items?: ItemProposal[] };
+  } | undefined;
+
+  if (rawNewQuest) {
+    const rawRewards = rawNewQuest.rewards as Record<string, unknown> | undefined;
+    let rewardItems: ItemProposal[] | undefined;
+    if (rawRewards?.itemsJson && typeof rawRewards.itemsJson === "string") {
+      try { rewardItems = JSON.parse(rawRewards.itemsJson); } catch { /* ignore */ }
+    } else if (rawRewards?.items && Array.isArray(rawRewards.items)) {
+      rewardItems = rawRewards.items as ItemProposal[];
+    }
+
+    newQuest = {
+      name: rawNewQuest.name as string,
+      description: rawNewQuest.description as string,
+      type: rawNewQuest.type as string | undefined,
+      objectives: rawNewQuest.objectives as Array<Record<string, unknown>> | undefined,
+      rewards: rawRewards ? {
+        exp: rawRewards.exp as number | undefined,
+        gold: rawRewards.gold as number | undefined,
+        items: rewardItems,
+      } : undefined,
+    };
+  }
+
+  let hasSkillReward = false;
+
+  if (newQuest) {
+    // 活跃任务数检查
+    const questCountResult = await validateActiveQuestCount(playerId, prisma);
+    if (!questCountResult.ok) {
+      return { success: false, error: questCountResult.reason };
+    }
+
+    // 奖励校验
+    if (newQuest.rewards) {
+      const rewardResult = validateQuestReward(newQuest.rewards, player.level, player.realm as Realm);
+      if (!rewardResult.ok) {
+        return { success: false, error: `任务奖励不合规：${rewardResult.reason}` };
+      }
+      // 检查是否有技能奖励（需要触发 supervisor）
+      if (newQuest.rewards.items?.some((i) => i.type === "skill")) {
+        hasSkillReward = true;
+      }
+    }
+  }
+
+  // 4. 经验奖励校验
+  const expReward = outcome.expReward as number | undefined;
+  if (expReward !== undefined) {
+    const expCap = player.level * 20; // 外交经验略低于战斗
+    if (expReward > expCap) {
+      return { success: false, error: `外交经验 ${expReward} 超过上限 ${expCap}` };
+    }
+  }
+
+  // 5. 触发监管 Agent（如果需要）
+  if (needsSupervisorCheck({ hasRareItem, hasSkillReward })) {
+    const supervisorResult = await supervisorCheck({
+      action: resolution,
+      description: `${resolution}: ${enemies.map((e) => e.name).join("、")} 外交解决`,
+      playerState: `Lv${player.level} HP:${player.hp}/${player.maxHp}`,
+      battleState: enemies.map((e) => `${e.name} HP:${e.hp}/${e.maxHp}`).join(", "),
+    });
+
+    if (!supervisorResult.approved) {
+      return { success: false, error: `监管 Agent 拒绝：${supervisorResult.reason}` };
+    }
+  }
+
+  // ---- 全部通过，执行外交 ----
+
+  // 结束战斗
+  await prisma.battleState.delete({ where: { id: battleId } });
+
+  // 赠送物品
+  const addedItemNames: string[] = [];
+  for (const item of validatedItems) {
+    await prisma.inventoryItem.create({
+      data: {
+        playerId,
+        name: item.name,
+        type: item.type,
+        quality: item.quality || "common",
+        quantity: item.quantity || 1,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        stats: (item.stats ?? undefined) as any,
+        specialEffect: item.specialEffect,
+      },
+    });
+    addedItemNames.push(item.name);
+  }
+
+  // 赠送金币
+  if (giftGold && giftGold > 0) {
+    await prisma.player.update({
+      where: { id: playerId },
+      data: { gold: { increment: giftGold } },
+    });
+  }
+
+  // 经验奖励
+  if (expReward && expReward > 0) {
+    const updatedPlayer = await prisma.player.update({
+      where: { id: playerId },
+      data: { exp: { increment: expReward } },
+    });
+
+    // 检查升级
+    const levelCheck = checkLevelUp(updatedPlayer.level, updatedPlayer.exp);
+    if (levelCheck.levelsGained > 0) {
+      const newStats = calcBaseStats(levelCheck.newLevel, updatedPlayer.realm as Realm);
+      await prisma.player.update({
+        where: { id: playerId },
+        data: {
+          level: levelCheck.newLevel,
+          exp: levelCheck.remainingExp,
+          maxHp: newStats.maxHp, maxMp: newStats.maxMp,
+          attack: newStats.attack, defense: newStats.defense, speed: newStats.speed,
+          hp: newStats.maxHp, mp: newStats.maxMp,
+        },
+      });
+    }
+  }
+
+  // 创建任务
+  let questCreated: { id: string; name: string } | null = null;
+  if (newQuest) {
+    const quest = await prisma.quest.create({
+      data: {
+        name: newQuest.name,
+        description: newQuest.description,
+        type: newQuest.type || "explore",
+        areaId: player.currentAreaId!,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        objectives: (newQuest.objectives || []) as any,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        rewards: (newQuest.rewards || {}) as any,
+      },
+    });
+
+    // 自动接取任务
+    const initialProgress = (newQuest.objectives || []).map(() => ({
+      currentCount: 0,
+      completed: false,
+    }));
+
+    await prisma.playerQuest.create({
+      data: {
+        playerId,
+        questId: quest.id,
+        status: "active",
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        progress: initialProgress as any,
+      },
+    });
+
+    questCreated = { id: quest.id, name: quest.name };
+  }
+
+  // 读取最新玩家状态
+  const latestPlayer = await prisma.player.findUnique({
+    where: { id: playerId },
+    select: { hp: true, mp: true, maxHp: true, maxMp: true, exp: true, gold: true, level: true, attack: true, defense: true, speed: true },
+  });
+
+  await logPlayerAction(
+    playerId,
+    "diplomacy",
+    `外交解决战斗（${resolution}）：${enemies.map((e) => e.name).join("、")}`,
+    {
+      battleId, resolution,
+      giftItems: addedItemNames,
+      giftGold,
+      expReward,
+      questCreated: questCreated?.name,
+      information: outcome.information,
+    }
+  );
+
+  return {
+    success: true,
+    data: {
+      resolution,
+      enemyNames: enemies.map((e) => e.name),
+      giftedItems: addedItemNames.length > 0 ? addedItemNames : undefined,
+      giftGold: giftGold || undefined,
+      expReward: expReward || undefined,
+      questCreated,
+      information: (outcome.information as string) || undefined,
+    },
+    stateUpdate: latestPlayer
+      ? {
+          hp: latestPlayer.hp,
+          mp: latestPlayer.mp,
+          maxHp: latestPlayer.maxHp,
+          maxMp: latestPlayer.maxMp,
+          exp: latestPlayer.exp,
+          gold: latestPlayer.gold,
+          level: latestPlayer.level,
+          attack: latestPlayer.attack,
+          defense: latestPlayer.defense,
+          speed: latestPlayer.speed,
+        }
+      : undefined,
   };
 }

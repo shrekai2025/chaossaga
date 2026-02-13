@@ -24,7 +24,9 @@ export async function GET(req: Request) {
       where: { id: playerId },
       include: {
         skills: true,
-        inventory: true,
+        inventory: {
+          where: { type: { not: "skill" } },
+        },
         equipment: true,
         quests: { include: { quest: true } },
       },
@@ -56,15 +58,23 @@ export async function GET(req: Request) {
     // 检查战斗状态
     const battle = await prisma.battleState.findUnique({
       where: { playerId: player.id },
-      select: { status: true },
+      select: { status: true, playerBuffs: true },
     });
     const isBattle = battle?.status === "active";
+    const playerBuffs = (battle?.playerBuffs ?? {}) as Record<string, unknown>;
+    const skillCooldowns = (playerBuffs.skillCooldowns ?? {}) as Record<string, number>;
+
+    const skillsWithCooldown = player.skills.map((s) => ({
+      ...s,
+      currentCooldown:
+        typeof skillCooldowns[s.id] === "number" ? skillCooldowns[s.id] : 0,
+    }));
 
     console.log(`[API /player] ID=${player.id} Name=${player.name} isBattle=${isBattle} (Status=${battle?.status})`);
 
     return NextResponse.json({
       success: true,
-      data: { ...player, location, isBattle },
+      data: { ...player, skills: skillsWithCooldown, location, isBattle },
     });
   }
 

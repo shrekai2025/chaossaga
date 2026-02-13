@@ -14,6 +14,7 @@ export default function GameTab({
   messages,
   isLoading,
   onSend,
+  onQuickBattleAction,
   onDelete,
   hasMoreHistory,
   loadingHistory,
@@ -24,6 +25,10 @@ export default function GameTab({
   messages: GameMessage[];
   isLoading: boolean;
   onSend: (text: string) => void;
+  onQuickBattleAction?: (
+    userText: string,
+    action: { type: "attack" | "skill"; skillId?: string; targetIndex?: number }
+  ) => void;
   onDelete?: (id: string) => void;
   hasMoreHistory?: boolean;
   loadingHistory?: boolean;
@@ -42,6 +47,7 @@ export default function GameTab({
             currentNodeId={playerState.currentNodeId}
             isLoading={isLoading}
             onSend={onSend}
+            onQuickBattleAction={onQuickBattleAction}
           />
         ) : (
           <div className="flex h-full items-center justify-center bg-linear-to-b from-accent-light/50 to-background">

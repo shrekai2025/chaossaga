@@ -73,6 +73,15 @@ body {
   background: var(--muted);
 }
 
+/* 隐藏滚动条（保留滚动功能） */
+.no-scrollbar {
+  -ms-overflow-style: none;  /* IE/Edge */
+  scrollbar-width: none;     /* Firefox */
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;             /* Chrome/Safari */
+}
+
 /* ============================================================
    HP / MP / EXP 进度条
    ============================================================ */

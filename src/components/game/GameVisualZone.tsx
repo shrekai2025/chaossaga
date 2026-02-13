@@ -25,11 +25,13 @@ interface EnemyInfo {
 }
 
 interface SkillInfo {
+  id: string;
   name: string;
   element: string;
   mpCost: number;
   damage: number;
   effect: unknown;
+  currentCooldown: number;
 }
 
 interface VisualData {
@@ -117,6 +119,7 @@ export default function GameVisualZone({
   currentNodeId,
   isLoading,
   onSend,
+  onQuickBattleAction,
 }: {
   playerId: string;
   isBattle?: boolean;
@@ -125,6 +128,11 @@ export default function GameVisualZone({
   isLoading?: boolean;
   /** 发送消息到聊天（用于战斗快捷按钮） */
   onSend?: (text: string) => void;
+  /** 极速战斗动作（直算，不经 LLM 决策） */
+  onQuickBattleAction?: (
+    userText: string,
+    action: { type: "attack" | "skill"; skillId?: string; targetIndex?: number }
+  ) => void;
 }) {
   const [data, setData] = useState<VisualData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -209,6 +217,7 @@ export default function GameVisualZone({
           enemies={data.enemies}
           skills={data.skills}
           onSend={onSend}
+          onQuickBattleAction={onQuickBattleAction}
           disabled={isLoading}
         />
       ) : (
@@ -294,6 +303,7 @@ function BattleView({
   enemies,
   skills,
   onSend,
+  onQuickBattleAction,
   disabled,
 }: {
   areaName: string;
@@ -301,6 +311,10 @@ function BattleView({
   enemies: EnemyInfo[];
   skills: SkillInfo[];
   onSend?: (text: string) => void;
+  onQuickBattleAction?: (
+    userText: string,
+    action: { type: "attack" | "skill"; skillId?: string; targetIndex?: number }
+  ) => void;
   disabled?: boolean;
 }) {
   return (
@@ -338,7 +352,9 @@ function BattleView({
         <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
           {/* 普攻按钮 */}
           <button
-            onClick={() => onSend?.("普通攻击")}
+            onClick={() =>
+              onQuickBattleAction?.("普通攻击", { type: "attack", targetIndex: 0 })
+            }
             disabled={disabled}
             className="shrink-0 flex items-center gap-1 rounded-lg border border-border bg-surface px-2.5 py-1 text-[11px] font-medium text-foreground shadow-sm transition-colors hover:border-accent/40 hover:bg-accent/5 active:scale-95 disabled:opacity-40 disabled:pointer-events-none"
           >
@@ -349,27 +365,41 @@ function BattleView({
           {/* 技能按钮 */}
           {skills.map((skill) => {
             const isHeal = skill.damage === 0 && (skill.effect as { type?: string })?.type === "heal";
+            const onCooldown = skill.currentCooldown > 0;
             return (
               <button
-                key={skill.name}
-                onClick={() => onSend?.(`使用技能「${skill.name}」`)}
-                disabled={disabled}
+                key={skill.id}
+                onClick={() =>
+                  onQuickBattleAction?.(`使用技能「${skill.name}」`, {
+                    type: "skill",
+                    skillId: skill.id,
+                    targetIndex: 0,
+                  })
+                }
+                disabled={disabled || onCooldown}
                 className={`shrink-0 flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium shadow-sm transition-colors active:scale-95 disabled:opacity-40 disabled:pointer-events-none ${
                   isHeal
                     ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-700 hover:bg-emerald-500/10"
                     : "border-accent/20 bg-accent/5 text-accent-dim hover:bg-accent/10"
                 }`}
-                title={`消耗 ${skill.mpCost} MP`}
+                title={
+                  onCooldown
+                    ? `冷却中，剩余 ${skill.currentCooldown} 回合`
+                    : `消耗 ${skill.mpCost} MP`
+                }
               >
                 <span className="text-xs">{elementIcon(skill.element)}</span>
                 <span>{skill.name}</span>
-                <span className="text-[9px] text-muted/60">{skill.mpCost}</span>
+                <span className="text-[9px] text-muted/60">
+                  {onCooldown ? `CD${skill.currentCooldown}` : skill.mpCost}
+                </span>
               </button>
             );
           })}
 
           {/* 逃跑按钮 */}
           <button
+            // 逃跑按需求继续走 chat 通道
             onClick={() => onSend?.("尝试逃跑")}
             disabled={disabled}
             className="shrink-0 flex items-center gap-1 rounded-lg border border-warning/20 bg-warning/5 px-2.5 py-1 text-[11px] font-medium text-warning shadow-sm transition-colors hover:bg-warning/10 active:scale-95 disabled:opacity-40 disabled:pointer-events-none"

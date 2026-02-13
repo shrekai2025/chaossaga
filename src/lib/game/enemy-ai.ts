@@ -109,6 +109,21 @@ export function decideEnemyAction(
     ? getPhaseSkills(enemy, availableSkills)
     : availableSkills;
 
+  // BOSS 强制保底：每 2 回合至少施放 1 次技能（偶数回合触发）
+  // 优先非治疗技能，避免保底回合只做治疗导致体感“没放技能”。
+  if (isBoss && roundNumber % 2 === 0 && phaseSkills.length > 0) {
+    const forcePool = phaseSkills.filter((s) => s.type !== "heal");
+    const selectedPool = forcePool.length > 0 ? forcePool : phaseSkills;
+    const strategy = hpPercent < 0.6 ? "aggressive" : "balanced";
+    const forcedSkill = weightedSkillSelect(selectedPool, strategy);
+    if (forcedSkill) {
+      if (forcedSkill.type === "heal") {
+        return { type: "heal", skill: forcedSkill, targetIndex: 0, phaseChange };
+      }
+      return { type: "skill", skill: forcedSkill, targetIndex: 0, phaseChange };
+    }
+  }
+
   // ---- 决策逻辑 ----
 
   // 1. 低 HP（< 30%）：优先治疗或防御
@@ -130,8 +145,9 @@ export function decideEnemyAction(
 
   // 2. 中 HP（30%-60%）：优先使用强力攻击技能
   if (hpPercent < 0.6 && attackSkills.length > 0) {
-    // 80% 概率用技能
-    if (Math.random() < 0.8) {
+    // BOSS 更激进地使用技能，避免“全程普攻”
+    const skillChance = isBoss ? 0.95 : 0.8;
+    if (Math.random() < skillChance) {
       const skill = weightedSkillSelect(attackSkills, "aggressive");
       if (skill) {
         return { type: "skill", skill, targetIndex: 0, phaseChange };
@@ -141,7 +157,12 @@ export function decideEnemyAction(
 
   // 3. 高 HP（>60%）：混合策略（攻击技能 + buff 技能，排除 heal）
   const nonHealSkills = phaseSkills.filter((s) => s.type !== "heal");
-  if (nonHealSkills.length > 0 && Math.random() < 0.5) {
+  if (nonHealSkills.length > 0) {
+    // BOSS 高血量阶段也应积极放技能，而非大概率平A
+    const skillChance = isBoss ? 0.85 : 0.5;
+    if (Math.random() >= skillChance) {
+      return { type: "attack", targetIndex: 0, phaseChange };
+    }
     const skill = weightedSkillSelect(nonHealSkills, "balanced");
     if (skill) {
       return { type: "skill", skill, targetIndex: 0, phaseChange };
@@ -189,9 +210,17 @@ function getPhaseSkills(
     enemy.phases.flatMap((p) => p.unlockedSkills)
   );
 
-  return availableSkills.filter(
+  const filtered = availableSkills.filter(
     (s) => !allPhaseSkillNames.has(s.name) || unlockedNames.has(s.name)
   );
+
+  // 兜底：若 phases 配置把所有技能都放进 unlockedSkills，且当前阈值未触发，
+  // 会导致阶段前“无技能可用”，敌人只能平A。这里回退到可用技能全集。
+  if (filtered.length === 0) {
+    return availableSkills;
+  }
+
+  return filtered;
 }
 
 /** 加权技能选择 */

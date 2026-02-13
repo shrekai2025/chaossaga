@@ -71,7 +71,7 @@ export async function GET(req: Request) {
   // 检查战斗状态
   const battle = await prisma.battleState.findUnique({
     where: { playerId },
-    select: { status: true, enemies: true },
+    select: { status: true, enemies: true, playerBuffs: true },
   });
 
   const isBattle = battle?.status === "active";
@@ -86,11 +86,13 @@ export async function GET(req: Request) {
 
   // 战斗模式下的额外数据
   let skills: Array<{
+    id: string;
     name: string;
     element: string;
     mpCost: number;
     damage: number;
     effect: unknown;
+    currentCooldown: number;
   }> = [];
 
   if (isBattle && battle?.enemies) {
@@ -116,6 +118,7 @@ export async function GET(req: Request) {
       where: { playerId, equipped: true },
       orderBy: { slotIndex: "asc" },
       select: {
+        id: true,
         name: true,
         element: true,
         mpCost: true,
@@ -123,12 +126,18 @@ export async function GET(req: Request) {
         effect: true,
       },
     });
+
+    const playerBuffs = (battle.playerBuffs ?? {}) as Record<string, unknown>;
+    const skillCooldowns = (playerBuffs.skillCooldowns ?? {}) as Record<string, number>;
     skills = equippedSkills.map((s) => ({
+      id: s.id,
       name: s.name,
       element: s.element,
       mpCost: s.mpCost,
       damage: s.damage,
       effect: s.effect,
+      currentCooldown:
+        typeof skillCooldowns[s.id] === "number" ? skillCooldowns[s.id] : 0,
     }));
   }
 

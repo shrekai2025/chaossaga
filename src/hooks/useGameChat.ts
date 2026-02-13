@@ -47,6 +47,12 @@ export interface PlayerState {
   isBattle?: boolean;
 }
 
+export interface QuickBattleAction {
+  type: "attack" | "skill";
+  skillId?: string;
+  targetIndex?: number;
+}
+
 export function useGameChat() {
   const [messages, setMessages] = useState<GameMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -399,6 +405,106 @@ export function useGameChat() {
     },
     [playerState, isLoading, loadPlayer, handleSSEEvent]
   );
+
+  /** 视觉区极速战斗动作（非流式）：直算 + LLM 包装叙事 */
+  const sendQuickBattleAction = useCallback(
+    async (userText: string, action: QuickBattleAction) => {
+      if (!playerState || isLoading) return;
+
+      const userMsg: GameMessage = {
+        id: genId(),
+        role: "user",
+        content: userText,
+        timestamp: Date.now(),
+      };
+
+      const aiMsgId = genId();
+      const aiMsg: GameMessage = {
+        id: aiMsgId,
+        role: "assistant",
+        content: "",
+        timestamp: Date.now(),
+        isStreaming: true,
+        loadingStage: "thinking",
+      };
+
+      setMessages((prev) => [...prev, userMsg, aiMsg]);
+      setIsLoading(true);
+
+      try {
+        const res = await fetch("/api/game/quick-action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            playerId: playerState.id,
+            userText,
+            action,
+          }),
+        });
+        const data = await res.json();
+
+        const content =
+          data.narrative ||
+          (data.success
+            ? "动作已执行。"
+            : `⚠️ ${data.error || "动作执行失败"}`);
+
+        // 构建 toolCalls 以便原始内容弹窗能显示 JSON
+        const toolCalls: Array<{ tool: string; success?: boolean; data?: unknown }> = [];
+        if (data.toolResult) {
+          toolCalls.push({
+            tool: "execute_battle_action",
+            success: data.toolResult.success,
+            data: data.toolResult.data,
+          });
+        }
+
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId
+              ? { ...m, content, isStreaming: false, loadingStage: undefined, toolCalls }
+              : m
+          )
+        );
+
+        // 立即更新数值状态
+        if (data.toolResult?.stateUpdate) {
+          setPlayerState((prev) =>
+            prev ? { ...prev, ...data.toolResult.stateUpdate } : prev
+          );
+        }
+
+        // 立即更新战斗状态（不用等 loadPlayer）
+        if (typeof data.isBattle === "boolean") {
+          setPlayerState((prev) =>
+            prev ? { ...prev, isBattle: data.isBattle } : prev
+          );
+        }
+      } catch {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId
+              ? {
+                  ...m,
+                  content: "⚠️ 极速战斗执行失败，请稍后重试。",
+                  isStreaming: false,
+                  loadingStage: undefined,
+                }
+              : m
+          )
+        );
+      } finally {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId ? { ...m, isStreaming: false } : m
+          )
+        );
+        setIsLoading(false);
+        await loadPlayer(playerState.id);
+      }
+    },
+    [playerState, isLoading, loadPlayer]
+  );
   /** 触发 AI 响应（不发送用户消息，仅触发 AI 根据当前上下文生成） */
   const triggerResponse = useCallback(async (systemContent?: string) => {
     if (!playerState || isLoading) return;
@@ -563,6 +669,7 @@ export function useGameChat() {
     hasMoreHistory,
     loadingHistory,
     sendMessage,
+    sendQuickBattleAction,
     deleteMessage,
     clearAllMessages,
     triggerResponse,

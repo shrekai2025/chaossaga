@@ -46,6 +46,7 @@ export default function GamePage() {
     hasMoreHistory,
     loadingHistory,
     sendMessage,
+    sendQuickBattleAction,
     deleteMessage,
     clearAllMessages,
     triggerResponse,
@@ -126,6 +127,7 @@ export default function GamePage() {
             messages={messages}
             isLoading={isLoading}
             onSend={sendMessage}
+            onQuickBattleAction={sendQuickBattleAction}
             onDelete={deleteMessage}
             hasMoreHistory={hasMoreHistory}
             loadingHistory={loadingHistory}

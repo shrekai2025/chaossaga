@@ -12,6 +12,7 @@ import { queryToolDefinitions } from "./query-tools";
 import { actionToolDefinitions } from "./action-tools";
 import { generateToolDefinitions } from "./generate-tools";
 import { modifyToolDefinitions } from "./modify-tools";
+import { environmentToolDefinitions } from "./environment-tools";
 
 // 工具执行函数
 import { getBattleState } from "./query-tools";
@@ -20,9 +21,12 @@ import {
   executeBattleAction,
   useItem,
   interactNpc,
+  improviseAction,
+  resolveBattleDiplomacy,
 } from "./action-tools";
+import { interactEnvironment } from "./environment-tools";
 import { generateArea, createQuest, updateQuest } from "./generate-tools";
-import { modifyPlayerData, addItem, abandonQuest } from "./modify-tools";
+import { modifyPlayerData, addItem, abandonQuest, modifyEnemyHp } from "./modify-tools";
 
 // ============================================================
 // 工具定义导出（传给 LLM 的 tools 参数）
@@ -34,17 +38,20 @@ export const ALL_TOOLS: NormalizedTool[] = [
   ...actionToolDefinitions,
   ...generateToolDefinitions,
   ...modifyToolDefinitions,
+  ...environmentToolDefinitions,
 ];
 
 /** 战斗模式专用工具集 (精简工具列表以减少幻觉) */
 export const BATTLE_TOOLS: NormalizedTool[] = ALL_TOOLS.filter((t) =>
   [
-    "execute_battle_action", // 核心战斗
-    "use_item",              // 喝药
-    "get_battle_state",      // 查询状态
-    "add_item",              // 战斗胜利奖励/掉落
-    "create_quest",          // 战斗触发任务
-    "update_quest",          // 战斗完成任务目标
+    "execute_battle_action",    // 核心战斗
+    "use_item",                 // 喝药
+    "get_battle_state",         // 查询状态
+    "add_item",                 // 战斗胜利奖励/掉落
+    "create_quest",             // 战斗触发任务
+    "update_quest",             // 战斗完成任务目标
+    "improvise_action",         // 创意行动
+    "resolve_battle_diplomacy", // 战斗外交
   ].includes(t.name)
 );
 
@@ -52,16 +59,19 @@ export const BATTLE_TOOLS: NormalizedTool[] = ALL_TOOLS.filter((t) =>
 export const GM_TOOLS: NormalizedTool[] = ALL_TOOLS.filter((t) =>
   [
     "modify_player_data",
+    "modify_enemy_hp",
     "add_item",
     "generate_area",
     "abandon_quest"
   ].includes(t.name)
 );
 
-/** 探索模式工具集 (标准游戏交互，不含 GM 工具) */
+/** 探索模式工具集 (标准游戏交互，不含 GM 工具，包含环境交互) */
 export const EXPLORATION_TOOLS: NormalizedTool[] = ALL_TOOLS.filter(
   (t) => 
-    t.name !== "execute_battle_action" && // 排除战斗工具
+    t.name !== "execute_battle_action" && // 排除战斗专用工具
+    t.name !== "improvise_action" &&      // 排除战斗创意工具
+    t.name !== "resolve_battle_diplomacy" && // 排除战斗外交工具
     !GM_TOOLS.some(gm => gm.name === t.name) // 排除 GM 工具
 );
 
@@ -93,12 +103,17 @@ const TOOL_HANDLERS: Record<
   // move_to_node: removed (now UI-driven via /api/player/move)
   interact_npc: interactNpc,
   // enhance_equipment: removed (unimplemented stub)
+  improvise_action: improviseAction,
+  resolve_battle_diplomacy: resolveBattleDiplomacy,
+  // 环境交互
+  interact_environment: interactEnvironment,
   // 生成类
   generate_area: generateArea,
   create_quest: createQuest,
   update_quest: updateQuest,
   // 修改类
   modify_player_data: modifyPlayerData,
+  modify_enemy_hp: modifyEnemyHp,
   add_item: addItem,
   abandon_quest: abandonQuest, // New GM tool
   // send_narrative: removed (LLM outputs text directly)

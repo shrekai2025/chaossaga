@@ -38,8 +38,12 @@ const STATE_MODIFYING_TOOLS = new Set([
   'update_quest',
   'process_quest_rewards', // hypothetical, usually update_quest covers this
   'modify_player_data', // GM tool
+  'modify_enemy_hp', // GM tool
   'use_item', // can heal
   'execute_battle_action', // yields loot/exp usually via internal logic, but prompts might hallmark it
+  'improvise_action', // creative combat action, can deal damage / heal / consume items
+  'resolve_battle_diplomacy', // diplomatic resolution, can gift items / gold / exp / quests
+  'interact_environment', // environment interaction, can pickup / use / consume items
 ]);
 
 // Patterns specific to battle fabrication — only ACTION outcomes, not status descriptions.

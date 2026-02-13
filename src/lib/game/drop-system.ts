@@ -16,7 +16,7 @@ import { calcBattleExp, calcGoldDrop } from "./formulas";
 /** 掉落物品模板（来自 BOSS.drops 或节点 data） */
 export interface DropTemplate {
   name: string;
-  type: "weapon" | "armor" | "accessory" | "consumable" | "material" | "quest_item" | "skill";
+  type: "weapon" | "armor" | "accessory" | "consumable" | "material" | "quest_item" | "skill" | "collectible";
   quality: "common" | "uncommon" | "rare" | "epic" | "legendary";
   stats?: Record<string, number>;
   specialEffect?: string;
@@ -81,7 +81,7 @@ const QUALITY_TABLE = {
 } as const;
 
 /** 基础物品掉落概率（每只敌人） */
-const BASE_ITEM_DROP_RATE = 0.25;
+const BASE_ITEM_DROP_RATE = 0.35;
 
 /** 通用消耗品池 */
 const GENERIC_CONSUMABLES: DropTemplate[] = [
@@ -96,6 +96,29 @@ const GENERIC_MATERIALS: DropTemplate[] = [
   { name: "魔力结晶", type: "material", quality: "uncommon", chance: 1.0 },
   { name: "元素核心", type: "material", quality: "rare", chance: 1.0 },
 ];
+
+type DropQuality = keyof typeof QUALITY_TABLE;
+
+const RANDOM_PREFIXES: Record<DropQuality, string[]> = {
+  common: ["粗糙的", "斑驳的", "旧制", "普通的"],
+  uncommon: ["精制", "结实的", "微光", "坚固的"],
+  rare: ["稀有", "秘纹", "湛蓝", "锋锐"],
+  epic: ["史诗", "远古", "星辉", "深渊"],
+  legendary: ["传说", "神铸", "天启", "圣辉"],
+};
+
+const RANDOM_COLLECTIBLES = ["海螺徽章", "碎裂珊瑚片", "古旧铜币", "发光贝壳", "奇异羽饰"];
+const RANDOM_MATERIALS = ["灵木碎片", "晶化尘砂", "潮汐矿屑", "星尘结晶", "异化鳞片"];
+const RANDOM_WEAPONS = ["短刃", "战斧", "长枪", "弯刀", "骨杖"];
+const RANDOM_ACCESSORIES = ["戒指", "护符", "挂坠", "腕环", "纹章"];
+
+const CATEGORY_WEIGHTS = [
+  { type: "consumable", weight: 30 },
+  { type: "material", weight: 25 },
+  { type: "collectible", weight: 15 },
+  { type: "weapon", weight: 15 },
+  { type: "accessory", weight: 15 },
+] as const;
 
 // ============================================================
 // 核心掉落计算
@@ -160,16 +183,45 @@ function rollGenericDrop(
   enemyLevel: number,
   playerLevel: number
 ): Omit<DroppedItem, "source"> | null {
-  // 品质滚动（等级差修正：高等级敌人更容易出好东西）
-  const quality = rollQuality(enemyLevel - playerLevel);
+  const quality = rollQuality(enemyLevel - playerLevel) as DropQuality;
+  const category = rollRandomCategory();
 
-  // 70% 概率掉消耗品，30% 概率掉材料
-  const pool = Math.random() < 0.7 ? GENERIC_CONSUMABLES : GENERIC_MATERIALS;
+  // 消耗品：保持当前固定池逻辑
+  if (category === "consumable") {
+    const fixed = rollFromFixedPool(GENERIC_CONSUMABLES, quality);
+    if (fixed) return fixed;
+  }
 
-  // 从池中选一个品质匹配的，没有就降一级
-  const qualityOrder: string[] = ["legendary", "epic", "rare", "uncommon", "common"];
+  // 材料：50% 固定池 + 50% 程序化随机
+  if (category === "material") {
+    if (Math.random() < 0.5) {
+      const fixed = rollFromFixedPool(GENERIC_MATERIALS, quality);
+      if (fixed) return fixed;
+    }
+    return buildRandomMaterial(quality);
+  }
+
+  if (category === "collectible") {
+    return buildRandomCollectible(quality);
+  }
+
+  if (category === "weapon") {
+    return buildRandomWeapon(quality, enemyLevel);
+  }
+
+  if (category === "accessory") {
+    return buildRandomAccessory(quality, enemyLevel);
+  }
+
+  return rollFromFixedPool(GENERIC_MATERIALS, quality);
+}
+
+function rollFromFixedPool(
+  pool: DropTemplate[],
+  quality: DropQuality
+): Omit<DroppedItem, "source"> | null {
+  const qualityOrder: DropQuality[] = ["legendary", "epic", "rare", "uncommon", "common"];
   const qualityIdx = qualityOrder.indexOf(quality);
-
   for (let i = qualityIdx; i < qualityOrder.length; i++) {
     const candidates = pool.filter((p) => p.quality === qualityOrder[i]);
     if (candidates.length > 0) {
@@ -183,8 +235,96 @@ function rollGenericDrop(
       };
     }
   }
-
   return null;
+}
+
+function rollRandomCategory(): (typeof CATEGORY_WEIGHTS)[number]["type"] {
+  const total = CATEGORY_WEIGHTS.reduce((s, c) => s + c.weight, 0);
+  let r = Math.random() * total;
+  for (const c of CATEGORY_WEIGHTS) {
+    r -= c.weight;
+    if (r <= 0) return c.type;
+  }
+  return "material";
+}
+
+function randomPick<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function randomPrefix(quality: DropQuality): string {
+  return randomPick(RANDOM_PREFIXES[quality]);
+}
+
+function qualityScale(quality: DropQuality): number {
+  switch (quality) {
+    case "common":
+      return 1.0;
+    case "uncommon":
+      return 1.25;
+    case "rare":
+      return 1.6;
+    case "epic":
+      return 2.1;
+    case "legendary":
+      return 2.8;
+  }
+}
+
+function buildRandomMaterial(quality: DropQuality): Omit<DroppedItem, "source"> {
+  const name = `${randomPrefix(quality)}${randomPick(RANDOM_MATERIALS)}`;
+  return {
+    name,
+    type: "material",
+    quality,
+    quantity: 1,
+  };
+}
+
+function buildRandomCollectible(quality: DropQuality): Omit<DroppedItem, "source"> {
+  const name = `${randomPrefix(quality)}${randomPick(RANDOM_COLLECTIBLES)}`;
+  return {
+    name,
+    type: "collectible",
+    quality,
+    quantity: 1,
+  };
+}
+
+function buildRandomWeapon(
+  quality: DropQuality,
+  enemyLevel: number
+): Omit<DroppedItem, "source"> {
+  const name = `${randomPrefix(quality)}${randomPick(RANDOM_WEAPONS)}`;
+  const atk = Math.max(1, Math.floor((2 + enemyLevel * 0.8) * qualityScale(quality)));
+  return {
+    name,
+    type: "weapon",
+    quality,
+    quantity: 1,
+    stats: { attack: atk },
+  };
+}
+
+function buildRandomAccessory(
+  quality: DropQuality,
+  enemyLevel: number
+): Omit<DroppedItem, "source"> {
+  const name = `${randomPrefix(quality)}${randomPick(RANDOM_ACCESSORIES)}`;
+  const scale = qualityScale(quality);
+  const statsPool: Array<Record<string, number>> = [
+    { defense: Math.max(1, Math.floor((1 + enemyLevel * 0.4) * scale)) },
+    { maxHp: Math.max(5, Math.floor((10 + enemyLevel * 4) * scale)) },
+    { maxMp: Math.max(3, Math.floor((6 + enemyLevel * 3) * scale)) },
+    { speed: Math.max(1, Math.floor((1 + enemyLevel * 0.25) * scale)) },
+  ];
+  return {
+    name,
+    type: "accessory",
+    quality,
+    quantity: 1,
+    stats: randomPick(statsPool),
+  };
 }
 
 /** 品质滚动（等级差修正） */

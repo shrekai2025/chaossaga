@@ -293,7 +293,7 @@ export class OpenAIAdapter implements LLMAdapter {
       if (!res.ok || !res.body) {
         const errorText = await res.text();
         console.error(`[OpenAI Adapter] 错误响应: ${res.status} ${errorText.slice(0, 200)}`);
-        yield { type: "error", message: `Tuzi API 流式错误: ${res.status} ${errorText.slice(0, 200)}` };
+        yield { type: "error", message: `OpenAI API 流式错误: ${res.status} ${errorText.slice(0, 200)}` };
         return;
       }
 

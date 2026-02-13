@@ -27,6 +27,34 @@ type Resolved<T> = ResolveResult<T> | ResolveNotFound;
 
 type InventoryItem = Awaited<ReturnType<typeof prisma.inventoryItem.findFirst>> & {};
 
+function buildItemIdentifierCandidates(identifier: string): string[] {
+  const normalized = identifier.trim();
+  const compact = normalized.replace(/\s+/g, "");
+  const candidates = new Set<string>([normalized, compact]);
+
+  const synonymPairs: Array<[string, string]> = [
+    ["回复", "恢复"],
+    ["恢复", "回复"],
+    ["药剂", "药水"],
+    ["药水", "药剂"],
+    ["血瓶", "回复药水"],
+    ["红药", "回复药水"],
+    ["蓝药", "魔力药水"],
+    ["法力药水", "魔力药水"],
+    ["魔法药水", "魔力药水"],
+  ];
+
+  for (const [from, to] of synonymPairs) {
+    for (const base of [...candidates]) {
+      if (base.includes(from)) {
+        candidates.add(base.replaceAll(from, to));
+      }
+    }
+  }
+
+  return [...candidates];
+}
+
 /**
  * 解析物品：先按 ID 查找，再按名称模糊匹配
  */
@@ -34,23 +62,29 @@ export async function resolveItem(
   identifier: string,
   playerId: string
 ): Promise<Resolved<NonNullable<InventoryItem>>> {
+  const candidates = buildItemIdentifierCandidates(identifier);
+
   // 1. 按 ID 精确查找
   const byId = await prisma.inventoryItem.findFirst({
-    where: { id: identifier, playerId },
+    where: { id: { in: candidates }, playerId },
   });
   if (byId) return { found: true, record: byId };
 
   // 2. 按名称精确匹配
-  const byExactName = await prisma.inventoryItem.findFirst({
-    where: { playerId, name: identifier },
-  });
-  if (byExactName) return { found: true, record: byExactName };
+  for (const name of candidates) {
+    const byExactName = await prisma.inventoryItem.findFirst({
+      where: { playerId, name },
+    });
+    if (byExactName) return { found: true, record: byExactName };
+  }
 
   // 3. 按名称模糊匹配（contains）
-  const byFuzzyName = await prisma.inventoryItem.findFirst({
-    where: { playerId, name: { contains: identifier } },
-  });
-  if (byFuzzyName) return { found: true, record: byFuzzyName };
+  for (const name of candidates) {
+    const byFuzzyName = await prisma.inventoryItem.findFirst({
+      where: { playerId, name: { contains: name } },
+    });
+    if (byFuzzyName) return { found: true, record: byFuzzyName };
+  }
 
   return { found: false, error: `背包中没有找到物品「${identifier}」` };
 }

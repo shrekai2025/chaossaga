@@ -124,7 +124,7 @@ export async function processGameMessage(
             select: { status: true },
           });
           const isBattle = activeBattle?.status === "active";
-          const isGM = !isBattle && ctx.message?.trim().toLowerCase().startsWith("/gm");
+          const isGM = Boolean(ctx.message?.trim().toLowerCase().startsWith("/gm"));
 
           const gameCtx = await buildGameContext(ctx.playerId, isBattle);
 
@@ -134,6 +134,7 @@ export async function processGameMessage(
             activeQuests: gameCtx.activeQuests,
             activeBattle: gameCtx.activeBattle,
             specialEffects: gameCtx.specialEffects,
+            isGMMode: isGM,
           });
 
           const systemPrompt =
@@ -144,7 +145,7 @@ export async function processGameMessage(
           const messages = [...gameCtx.history];
           if (ctx.message) {
             // [Optimization] 战斗模式下注入强提示，防止 AI 先输出一大段废话再调工具
-            const suffix = isBattle 
+            const suffix = isBattle && !isGM
               ? "\n\n(系统强指令：立即调用 execute_battle_action 工具，严禁在工具调用前输出任何剧情文本)"
               : "";
             messages.push({ role: "user" as const, content: ctx.message + suffix });
@@ -233,10 +234,12 @@ export async function processGameMessage(
                  // - GM指令：仅当消息以 "/gm" 开头时，混合 EXPLORATION + GM 工具
                  // - 普通探索：仅使用 EXPLORATION_TOOLS
                  let tools = isBattle ? BATTLE_TOOLS : EXPLORATION_TOOLS;
-                 
-                 if (!isBattle && ctx.message?.trim().toLowerCase().startsWith("/gm")) {
-                    tools = [...EXPLORATION_TOOLS, ...GM_TOOLS];
-                    console.log("[GameMaster] 激活 GM 工具模式");
+
+                 if (isGM) {
+                    tools = isBattle
+                      ? [...GM_TOOLS]
+                      : [...EXPLORATION_TOOLS, ...GM_TOOLS];
+                    console.log(`[GameMaster] 激活 GM 工具模式 (isBattle=${isBattle})`);
                  }
 
                  const stream = client.chatStreamWithTools(
@@ -337,8 +340,8 @@ export async function processGameMessage(
                  if (finalResponse) {
                    console.log(`[GameMaster] JSON 解析成功: narrative=${finalResponse.narrative.length}字, suggestions=${finalResponse.suggestions?.length || 0}个`);
 
-                   // 发送 suggestions（如果有）
-                   if (finalResponse.suggestions && finalResponse.suggestions.length > 0) {
+                  // 战斗模式下不发送建议动作，避免用户一直点建议走 chat 通道
+                  if (!isBattle && finalResponse.suggestions && finalResponse.suggestions.length > 0) {
                      await send({
                        type: "actions",
                        data: {
@@ -374,8 +377,8 @@ export async function processGameMessage(
                        fallbackText = `(AI 思考中: ${thoughtContent})`;
                    }
 
-                   // 如果回退解析出了 suggestions，发送它们
-                   if (fallback.suggestions && fallback.suggestions.length > 0) {
+                  // 战斗模式下不发送建议动作，避免用户一直点建议走 chat 通道
+                  if (!isBattle && fallback.suggestions && fallback.suggestions.length > 0) {
                      await send({
                        type: "actions",
                        data: {
